@@ -157,6 +157,10 @@ test('posts: 스키마 위반 거부 (타인 uid, uid 변경, 임의 필드, cre
   await assertFails(getDoc(doc(db, 'posts/legacy_bob_1700000000000')));
   await assertFails(getDoc(doc(db, 'posts/random_missing')));
   await assertFails(getDoc(doc(db, 'posts/legacy_alice_x')).then(() => getDoc(doc(bob(), 'posts/pa'))));
+  // 사진 경로 목록 (최대 10개)
+  await assertSucceeds(setDoc(doc(db, 'posts/p_photos'), { ...base, photos: [{ path: 'users/alice/generations/g/photo_1.jpg', index: 1 }] }));
+  await assertFails(setDoc(doc(db, 'posts/p_photos2'), { ...base, photos: new Array(11).fill({ path: 'x' }) }));
+  await assertFails(setDoc(doc(db, 'posts/p_photos3'), { ...base, photos: 'not-a-list' }));
   // 로컬 저장 글 이전(legacy) 형식 허용
   await assertSucceeds(setDoc(doc(db, 'posts/legacy_alice_1700000000000'), { ...base, legacyId: 1700000000000, legacySavedAt: '2024. 1. 1. 오후 3:00:00' }));
 });

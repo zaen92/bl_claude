@@ -13,9 +13,10 @@ export const subscribePosts = (uid, cb) =>
     (e) => { console.warn('posts', e); cb([]); },
   );
 
-export function createPost(uid, { title, type, data, generationId = null }) {
+export function createPost(uid, { title, type, data, generationId = null, photos = [] }) {
   return addDoc(collection(db, 'posts'), {
     uid, title: (title || '제목 없음').slice(0, 300), type: type || '', data, generationId,
+    photos: photos.slice(0, 10).map((p) => ({ path: p.path, index: p.index || 0 })),
     createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
 }

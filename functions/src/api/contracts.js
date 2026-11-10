@@ -1,8 +1,9 @@
 'use strict';
 /**
  * 서버 API 인터페이스 정의 (JSDoc 타입).
- * STEP 1: ensureUserProfile, adminAdjustCredits 구현 / generatePost 는 에뮬레이터 모의 응답만.
- * STEP 2~3: generatePost(실제 Claude+네이버), createOrder, confirmPayment, tossWebhook 구현 예정.
+ * STEP 1: ensureUserProfile, adminAdjustCredits
+ * STEP 2: generatePost(실제 Claude + 네이버 + 크레딧 차감/복구), getGenerationStatus, sweepStaleGenerations
+ * STEP 3: createOrder, confirmPayment, tossWebhook (현재 인터페이스만)
  * 자세한 흐름은 docs/API.md 참고.
  *
  * ── 공통 ──────────────────────────────────────────────
@@ -38,14 +39,28 @@
  * @property {string} place_name @property {string} place_address @property {string} place_hours @property {string} place_price
  * @property {string} body @property {string[]} hashtags @property {string} reel @property {string} thumbnail
  *
- * @typedef {Object} GeneratePostResponse
- * @property {string} generationId
- * @property {GenerationResult} result
+ * @typedef {Object} GenerationView  (generatePost / getGenerationStatus 공통)
+ * @property {string} generationId       `${uid}_${clientRequestId}`
+ * @property {'processing'|'succeeded'|'failed'} status
+ * @property {GenerationResult|null} result
  * @property {PlaceInfo|null} naver
- * @property {number} creditsRemaining
- * @property {boolean} mock             에뮬레이터 모의 응답 여부
+ * @property {{path:string,index:number}[]} photos   Storage 경로 (본인만 읽기)
+ * @property {{reason:string,message:string,retryable:boolean}|null} error
+ * @property {boolean} refunded           실패 시 크레딧 복구 여부
+ * @property {boolean} mock               에뮬레이터 mock AI 결과 여부
  *
- * 스트리밍 청크(StreamChunk): { type:'status', message:string } | { type:'text', delta:string }
+ * @typedef {GenerationView & {creditsRemaining:number, usage:{inputTokens:number,outputTokens:number}, duplicate?:boolean}} GeneratePostResponse
+ *   duplicate=true: 같은 clientRequestId 의 기존 결과(추가 차감 없음)
+ *
+ * 실패 시 HttpsError.details: { reason, generationId?, refunded?, retryable?, creditsRemaining?, retryAfterSec? }
+ *   reason: insufficient_credits | rate_limited | daily_limit | too_many_concurrent | storage_quota | email_not_verified
+ *         | ai_not_configured | ai_timeout | ai_network | ai_rate_limited | ai_unavailable | ai_config | ai_billing
+ *         | ai_bad_request | ai_refusal | ai_empty_result | ai_incomplete | storage_failed | internal
+ *
+ * 스트리밍 청크(StreamChunk): { type:'status', message:string, generationId?:string } | { type:'text', delta:string }
+ *
+ * @typedef {Object} GetGenerationStatusRequest
+ * @property {string} generationId
  *
  * @typedef {Object} CreateOrderRequest
  * @property {string} packageId          creditPackages/{packageId}

@@ -30,6 +30,7 @@ test('신규 인증 회원: 크레딧 2개 + 원장 1건', async () => {
   assert.equal(r.credits, 2);
   const u = (await db.doc('users/u1').get()).data();
   assert.equal(u.credits, 2);
+  assert.deepEqual([u.freeCredits, u.paidCredits], [2, 0]);
   assert.equal(u.signupBonus.status, 'granted');
   assert.equal(u.displayName, '유저1');
   const l = await ledgerOf('u1');

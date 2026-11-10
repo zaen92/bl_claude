@@ -1,98 +1,198 @@
-// 브라우저 스모크 테스트 (선택). 사전 조건: 에뮬레이터 + `npm run dev` 실행 중, playwright 설치 필요.
+// 브라우저 E2E 스모크 테스트 (선택). Claude 는 에뮬레이터 mock — 실제 API 호출 아님.
+// 사전 조건: `npm run emulators:clean` + `npm run dev` 실행 중
 //   npm i --no-save playwright && npx playwright install chromium && node tests/e2e/smoke.cjs
 const { chromium } = require('playwright');
-const path = require('path'); const fs = require('fs'); const OUT = path.join(__dirname, 'screenshots'); fs.mkdirSync(OUT, { recursive: true });
+const path = require('path');
+const fs = require('fs');
+const assert = require('assert/strict');
+process.env.FIRESTORE_EMULATOR_HOST = process.env.FIRESTORE_EMULATOR_HOST || '127.0.0.1:8080';
+const { initializeApp } = require(path.join(__dirname, '../../functions/node_modules/firebase-admin/lib/app'));
+const { getFirestore } = require(path.join(__dirname, '../../functions/node_modules/firebase-admin/lib/firestore'));
+const { adminAdjustCredits } = require('../../functions/src/lib/credits');
+
+const OUT = path.join(__dirname, 'screenshots'); fs.mkdirSync(OUT, { recursive: true });
 const AUTH = 'http://127.0.0.1:9099';
+const APP = process.env.APP_URL || 'http://127.0.0.1:5173/';
+const db = getFirestore(initializeApp({ projectId: 'demo-jaeinit' }));
+const log = (...a) => console.log('✔', ...a);
+// 작은 JPEG 3장 (색이 다른 1x1)
+const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA='];
+
 (async () => {
   const b = await chromium.launch();
   const ctx = await b.newContext({ viewport: { width: 1280, height: 860 } });
   const p = await ctx.newPage();
   const errs = [];
+  const bodies = [];
   p.on('pageerror', (e) => errs.push('pageerror ' + e.message));
-  p.on('console', (m) => { if (m.type() === 'error') errs.push('console ' + m.text()); });
-  p.on('dialog', async (d) => { console.log('DIALOG:', d.message().replace(/\n/g, ' ')); await d.accept(); });
+  p.on('console', (m) => { if (m.type() === 'error' && !/net::ERR_INTERNET_DISCONNECTED|Failed to fetch|ERR_NETWORK|Could not reach Cloud Firestore|WebChannelConnection/.test(m.text())) errs.push('console ' + m.text()); });
+  p.on('dialog', async (d) => { await d.accept(); });
+  p.on('request', (r) => { const pd = r.postData(); if (pd) bodies.push(pd); });
+  const credits = async () => p.textContent('#stxStatus');
+  const historyCount = () => p.locator('#historyList > div').count();
 
-  // 이전 버전 데이터 심기: API 키 + 저장 글
-  await p.goto('http://127.0.0.1:5173/');
+  // ── 이전 버전 데이터 (API 키 + 저장 글) ──
+  await p.goto(APP);
   await p.evaluate(() => {
     localStorage.setItem('jaeinit_claude_key', 'sk-ant-api03-OLD');
     localStorage.setItem('jaeinit_naver_id', 'nid'); localStorage.setItem('jaeinit_naver_sec', 'nsec');
-    localStorage.setItem('jaeinit_saved_posts', JSON.stringify([
-      { id: 1700000000000, title: '예전 글 1', type: '맛집', date: '2024. 1. 1. 오후 3:00:00', data: { title_1: '예전 글 1', body: '안녕하세요\\n예전 본문', hashtags: ['#예전'] } },
-      { id: 1700000000001, title: '예전 글 2', type: '카페', date: '2024. 1. 2.', data: { title_1: '예전 글 2', body: '두번째', hashtags: [] } },
-    ]));
+    localStorage.setItem('jaeinit_saved_posts', JSON.stringify([{ id: 1700000000000, title: '예전 글', type: '맛집', date: '2024. 1. 1.', data: { title_1: '예전 글', body: '예전 본문', hashtags: ['#예전'] } }]));
   });
-  await p.reload(); await p.waitForTimeout(1500);
-  const keys = await p.evaluate(() => ['jaeinit_claude_key', 'jaeinit_naver_id', 'jaeinit_naver_sec', 'jaeinit_saved_posts'].map((k) => localStorage.getItem(k) !== null));
-  console.log('localStorage [claude,naverId,naverSec,savedPosts] 존재:', keys);
-  console.log('헤더:', await p.textContent('#stx'), '|', await p.textContent('#stxStatus'));
-  await p.screenshot({ path: OUT + '/1-logged-out.png' });
-
-  // 비로그인 생성 → 로그인 모달
+  await p.reload(); await p.waitForTimeout(1200);
+  assert.deepEqual(await p.evaluate(() => ['jaeinit_claude_key', 'jaeinit_naver_id', 'jaeinit_naver_sec'].map((k) => localStorage.getItem(k))), [null, null, null]);
+  log('기존 브라우저 API 키 3종 삭제');
   await p.click('#gb');
-  console.log('비로그인 생성 클릭 → 로그인 모달 표시:', await p.isVisible('#viewLogin'));
-  await p.screenshot({ path: OUT + '/2-login-modal.png' });
+  assert.ok(await p.isVisible('#viewLogin')); log('비로그인 생성 → 로그인 모달');
 
-  // 이메일 가입
+  // ── 가입·인증 ──
   const email = 'e2e' + Date.now() + '@example.com';
   await p.fill('#authEmail', email); await p.fill('#authPw', 'pw123456');
   await p.click('#btnSignup');
-  await p.waitForSelector('#viewVerify.on', { timeout: 10000 });
-  await p.waitForTimeout(1500);
-  console.log('가입 후 인증 화면, 헤더:', await p.textContent('#stxStatus'));
-  // 미인증 상태 생성 시도 → 인증 모달
-  await p.click('#viewVerify .auth-link');
-  await p.click('#gb');
-  console.log('미인증 상태 생성 클릭 → 인증 모달:', await p.isVisible('#viewVerify'));
-  // 이메일 인증 (에뮬레이터 OOB 링크 사용)
+  await p.waitForSelector('#viewVerify.on');
   const oob = await (await fetch(`${AUTH}/emulator/v1/projects/demo-jaeinit/oobCodes`)).json();
-  const code = oob.oobCodes.filter((c) => c.email === email && c.requestType === 'VERIFY_EMAIL').pop();
-  await fetch(code.oobLink);
-  await p.click('#viewVerify .modal-b >> nth=0'); // 인증 완료
-  await p.waitForSelector('#viewAccount.on', { timeout: 10000 });
-  await p.waitForFunction(() => document.getElementById('acctCredits').textContent === '2개', null, { timeout: 10000 });
-  await p.waitForTimeout(800);
-  console.log('계정: 크레딧', await p.textContent('#acctCredits'), '|', await p.textContent('#acctBonus'), '| 원장:', (await p.textContent('#acctLedger')).trim(), '| 헤더:', await p.textContent('#stxStatus'));
-  await p.screenshot({ path: OUT + '/3-account.png' });
-  await p.click('#viewAccount .modal-b >> nth=-1'); // 닫기
+  await fetch(oob.oobCodes.filter((c) => c.email === email && c.requestType === 'VERIFY_EMAIL').pop().oobLink);
+  await p.click('#viewVerify .modal-b >> nth=0');
+  await p.waitForFunction(() => document.getElementById('acctCredits').textContent === '2개');
+  await p.click('#viewAccount .modal-b >> nth=-1');
+  assert.equal(await credits(), '크레딧 2개');
+  assert.match(await p.textContent('#genHint'), /1크레딧.*남은 크레딧 2개/);
+  log('가입·인증 → 크레딧 2개, 차감 안내 표시');
 
-  // 생성
-  await p.fill('#ti', '세비야 타파스 맛집 바 알팔파');
-  await p.fill('#ci', '살모레호 맛있음, 웨이팅 20분');
-  await p.click('.tb >> text=맛집');
-  await p.click('.vb >> nth=1');
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-  await p.setInputFiles('#fi', { name: 'a.png', mimeType: 'image/png', buffer: png });
-  await p.waitForSelector('.pi');
+  async function fill(memo, nImg) {
+    await p.fill('#ti', '세비야 타파스 맛집 바 알팔파');
+    await p.fill('#ci', '살모레호 맛있음, 웨이팅 20분');
+    await p.fill('#mi', memo || '');
+    await p.click('.tb >> text=맛집');
+    await p.click('.vb >> nth=1');
+    if (nImg) {
+      await p.setInputFiles('#fi', Array.from({ length: nImg }, (_, i) => ({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(JPEGS[0], 'base64') })));
+      await p.waitForFunction((n) => document.querySelectorAll('.pi').length === n, nImg);
+    }
+  }
+
+  // ── ① 사진 3장 생성 성공 ──
+  await fill('', 3);
   await p.click('#gb');
   await p.waitForSelector('#rb3.on', { timeout: 20000 });
-  console.log('생성 결과 제목1:', await p.textContent('.tc-x >> nth=0'), '| 글자수:', await p.textContent('#cc'), '| 스트림 박스 길이:', (await p.textContent('#sb')).length);
-  await p.screenshot({ path: OUT + '/4-result.png', fullPage: false });
+  assert.ok((await p.textContent('#sb')).includes('1크레딧 예약'));
+  await p.waitForFunction(() => document.getElementById('stxStatus').textContent === '크레딧 1개');
   await p.click('#tabPreview');
-  console.log('미리보기 이미지 수:', await p.locator('.pp-img img').count());
-  await p.screenshot({ path: OUT + '/5-preview.png' });
+  assert.equal(await p.locator('.pp-img img').count(), 3);
+  await p.screenshot({ path: OUT + '/1-preview-3photos.png' });
+  log('사진 3장 생성 성공 → 크레딧 1개, 미리보기 사진 3장');
   await p.click('#tabResult');
-
-  // 저장
   await p.click('#saveBtn');
-  await p.waitForFunction(() => document.getElementById('savedCount').textContent === '1', null, { timeout: 10000 });
-  await p.click('#tabSaved');
-  console.log('저장 탭 카운트:', await p.textContent('#savedCount'), '| 레거시 배너:', (await p.textContent('#legacyBar')).trim().slice(0, 40));
-  await p.click('.legacy-bar button');
-  await p.waitForFunction(() => document.getElementById('savedCount').textContent === '3', null, { timeout: 10000 });
-  console.log('가져오기 후 카운트:', await p.textContent('#savedCount'), '| 배너 남음:', (await p.textContent('#legacyBar')).trim().length > 0);
-  await p.screenshot({ path: OUT + '/6-saved.png' });
-  // 다시 로드해도 중복 없음 & 레거시 원본 유지
-  await p.reload(); await p.waitForFunction(() => document.getElementById('savedCount').textContent === '3', null, { timeout: 10000 });
-  console.log('새로고침 후 카운트 3 유지, 레거시 원본 보존:', await p.evaluate(() => JSON.parse(localStorage.getItem('jaeinit_saved_posts')).length));
-  // 불러오기
-  await p.click('#tabSaved');
-  await p.click('text=📄 불러오기 >> nth=-1');
-  console.log('불러온 본문:', (await p.textContent('#btxt')).replace(/\n/g, '⏎').slice(0, 30));
-  // 로그아웃
-  await p.click('#stx'); await p.click('#viewAccount .modal-b.sub');
+  await p.waitForFunction(() => document.getElementById('savedCount').textContent === '1');
+  log('저장 완료');
+
+  // ── ② API 오류 → 복구 안내 + 재시도 버튼 ──
+  await p.fill('#mi', '[[mock:error]]');
+  await p.waitForTimeout(1100); // 완료 직후 1초는 재클릭 무시(더블클릭 방지)
+  await p.click('#gb');
+  await p.waitForSelector('#eb.on .err-retry', { timeout: 20000 });
+  assert.match(await p.textContent('#eb'), /복구/);
   await p.waitForTimeout(800);
-  console.log('로그아웃 후 헤더:', await p.textContent('#stxStatus'), '| 저장 카운트:', JSON.stringify(await p.textContent('#savedCount')));
-  console.log('ERRORS:', errs.length ? errs : 'none');
+  assert.equal(await credits(), '크레딧 1개');
+  await p.screenshot({ path: OUT + '/2-error-refund.png' });
+  log('AI 오류 → "1크레딧 자동 복구" 안내 + 다시 시도 버튼, 잔액 1개 유지');
+
+  // ── ③ 생성 중 새로고침 → 상태 복구 ──
+  await p.fill('#mi', '[[mock:slow:4000]]');
+  await p.waitForTimeout(1100);
+  await p.click('#gb');
+  await p.waitForTimeout(1200);
+  await p.reload();
+  await p.waitForSelector('#rb3.on', { timeout: 30000 });
+  await p.waitForFunction(() => document.getElementById('stxStatus').textContent === '크레딧 0개');
+  assert.equal(await p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('jaeinit_pending_generation_')).length), 0);
+  log('생성 중 새로고침 → 서버 결과 자동 복구, 크레딧 0개');
+
+  // ── ④ 크레딧 0 → 충전 예정 안내 (서버 호출 없음) ──
+  await fill('', 0);
+  await p.click('#tabHistory');
+  const before = await historyCount();
+  await p.waitForTimeout(1100);
+  await p.click('#gb');
+  assert.match(await p.textContent('#eb'), /충전 기능은 곧 오픈/);
+  assert.match(await p.textContent('#genHint'), /곧 오픈/);
+  await p.waitForTimeout(800);
+  assert.equal(await historyCount(), before);
+  log('크레딧 0개 → 생성 차단 + 충전 예정 안내');
+
+  // 관리자 보상 +3 (테스트 진행용)
+  const userUid = (await db.collection('users').where('email', '==', email).get()).docs[0].id;
+  await adminAdjustCredits(db, { uid: userUid, delta: 3, reason: 'E2E', requestId: 'req_e2e_' + Date.now(), actorUid: 'e2e' });
+  await p.waitForFunction(() => document.getElementById('stxStatus').textContent === '크레딧 3개');
+
+  // ── ⑤ 더블클릭 → 1건만 ──
+  await p.waitForTimeout(1100);
+  // 더블클릭 + 같은 순간 3회 호출 (버튼 비활성화 전 경합 상황)
+  await Promise.all([p.dblclick('#gb'), p.evaluate(() => { window.gen(); window.gen(); window.gen(); })]);
+  await p.waitForSelector('#rb3.on', { timeout: 20000 });
+  await p.waitForTimeout(1000);
+  assert.equal(await credits(), '크레딧 2개');
+  assert.equal(await historyCount(), before + 1);
+  log('더블클릭·동시 호출 → 생성 1건, 1크레딧만 차감');
+
+  // ── ⑥ 네트워크 끊김: 요청은 서버에 도착했지만 브라우저가 응답을 잃음 ──
+  await p.fill('#mi', '[[mock:slow:3000]]');
+  await p.route('**/generatePost', async (route) => {
+    route.fetch().catch(() => {}); // 서버에는 그대로 전달
+    await new Promise((r) => setTimeout(r, 800));
+    await route.abort('internetdisconnected'); // 브라우저 쪽 연결만 끊김
+  });
+  await p.waitForTimeout(1100);
+  await p.click('#gb');
+  await p.waitForSelector('#eb.on', { timeout: 15000 });
+  assert.match(await p.textContent('#eb'), /연결이 불안정/);
+  await p.screenshot({ path: OUT + '/3-network-lost.png' });
+  await p.unroute('**/generatePost');
+  await p.waitForSelector('#rb3.on', { timeout: 40000 });
+  await p.waitForFunction(() => document.getElementById('stxStatus').textContent === '크레딧 1개', null, { timeout: 15000 });
+  await p.waitForTimeout(1500);
+  assert.equal(await credits(), '크레딧 1개');
+  log('응답 유실(네트워크 끊김) → 서버 기록으로 결과 복구, 중복 차감 없음 (크레딧 1개)');
+
+  // ── ⑦ 새로고침 후 저장 글·사진 다시 불러오기 ──
+  await p.reload();
+  await p.waitForFunction(() => document.getElementById('savedCount').textContent === '1');
+  await p.click('#tabSaved');
+  assert.match(await p.textContent('#savedList'), /📸 3장/);
+  await p.click('#savedList >> text=📄 불러오기');
+  await p.waitForSelector('#rb3.on');
+  await p.click('#tabPreview');
+  await p.waitForFunction(() => document.querySelectorAll('.pp-img img').length === 3, null, { timeout: 10000 }).catch(async (e) => {
+    console.log('DEBUG', (await p.innerHTML('#previewArea')).slice(0, 600), errs); throw e;
+  });
+  const srcs = await p.$$eval('.pp-img img', (els) => els.map((e) => e.src));
+  assert.ok(srcs.every((s) => s.includes('/v0/b/demo-jaeinit.appspot.com/o/users%2F' + userUid)), srcs[0]);
+  const loaded = await p.$$eval('.pp-img img', (els) => els.every((e) => e.complete && e.naturalWidth > 0));
+  assert.ok(loaded, '이미지 로드');
+  await p.screenshot({ path: OUT + '/4-saved-reload-photos.png' });
+  log('새로고침 후 저장 글 불러오기 → Storage 사진 3장 표시');
+
+  // ── 생성 이력 ──
+  await p.click('#tabHistory');
+  const ht = await p.textContent('#historyList');
+  assert.match(ht, /✅ 완료/); assert.match(ht, /❌ 실패 · 크레딧 복구됨/);
+  await p.screenshot({ path: OUT + '/5-history.png' });
+  log('생성 이력: 완료/실패(복구) 표시');
+
+  // ── 이전 글 가져오기 (STEP 1 회귀) ──
+  await p.click('#tabSaved');
+  await p.click('.legacy-bar button');
+  await p.waitForFunction(() => document.getElementById('savedCount').textContent === '2');
+  log('STEP 1 회귀: 이전 로컬 글 가져오기');
+
+  // ── API 키 노출 확인 ──
+  const leaked = bodies.filter((x) => /sk-ant-api|x-api-key/i.test(x) && !x.includes('sk-ant-api03-OLD'));
+  assert.equal(leaked.length, 0);
+  const html = await p.content();
+  assert.ok(!/sk-ant-|api\.anthropic\.com|openapi\.naver\.com/.test(html));
+  log('브라우저 요청·페이지에 API 키/외부 AI 엔드포인트 없음');
+
+  assert.deepEqual(errs, []);
+  log('콘솔 오류 없음');
   await b.close();
+  process.exit(0);
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

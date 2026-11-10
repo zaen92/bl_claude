@@ -180,3 +180,12 @@ input[type=radio]{display:none}
 .acct-pk-i b{display:block;font-size:15px;color:var(--green)}
 .legacy-bar{background:var(--gl);border:1px solid var(--gm);border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:12px;color:var(--green2);display:flex;align-items:center;justify-content:space-between;gap:10px}
 .legacy-bar button{background:var(--green);color:#fff;border:none;border-radius:7px;padding:7px 12px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap}
+/* ── STEP 2 추가 ── */
+.gen-hint{font-size:10px;color:var(--muted);text-align:center;margin-top:7px;line-height:1.5}
+.gen-hint b{color:var(--green)}
+.err-retry{display:inline-block;margin-top:8px;background:var(--danger);color:#fff;border:none;border-radius:7px;padding:7px 12px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.err.info{background:var(--gl);border-color:var(--gm);color:var(--green2)}
+.hst{display:inline-block;border-radius:99px;padding:2px 8px;font-size:10px;font-weight:700}
+.hst.ok{background:var(--gl);color:var(--green)}
+.hst.run{background:#fff8e1;color:#b26a00}
+.hst.fail{background:#fff5f5;color:var(--danger)}

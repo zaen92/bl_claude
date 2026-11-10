@@ -36,7 +36,8 @@
 | 마크업 | `web/index.html` | 동일. API 키 설정 모달 → 로그인/계정 모달, 헤더 버튼 문구만 변경 |
 | `buildPrompt`, `recover`, JSON 파싱 | `functions/src/ai/prompt.js`, `parse.js` | **서버로 이전**. 프롬프트 문구 동일 (전역변수 → 인자) |
 | 네이버 결과 병합 | `functions/src/ai/prompt.js#mergePlaceInfo` | 서버로 이전 (STEP 2 에서 사용) |
-| `gen` | `web/src/main.js#gen` + `api.js#generatePost` | 브라우저는 서버 callable 만 호출. 스트리밍은 callable stream 으로 유지 |
+| `gen` | `web/src/main.js#gen` + `api.js#generatePost` → `functions/src/generation/service.js` | 브라우저는 서버 callable 만 호출. 서버가 크레딧 예약 → Claude(`src/ai/claude.js`) → 확정/복구. 스트리밍은 callable stream 으로 유지 |
+| `searchNaver` | `functions/src/naver.js` | 서버로 이전 (키는 Secret Manager) |
 | `show`, `renderPreview`, `cp*`, `anim`, `switchTab` | `web/src/render.js` | 동일 로직. AI 결과를 innerHTML 로 넣던 곳(위치정보·해시태그)만 HTML 이스케이프 추가 |
 | `compress`, `addImg`, `reNumber` | `web/src/images.js` | 동일 |
 | `savePost`, `renderSavedList` 등 | `web/src/posts.js`, `main.js` | localStorage → Firestore `posts` (카드 UI 동일) |
@@ -48,7 +49,7 @@
 |---|---|---|
 | 저장된 글 (`jaeinit_saved_posts`: `{id,title,type,date,data}`) | localStorage | 로그인 후 "저장된 글" 탭에 **계정으로 가져오기** 배너 표시. 문서 ID `legacy_{uid}_{기존id}` 로 고정 → 여러 번 눌러도 중복 없음. **localStorage 원본은 삭제하지 않음**(백업). `data` 객체는 변환 없이 그대로 저장 |
 | 생성 결과 (`resultData`) | 메모리 | 동일 구조(GenerationResult) 유지 → 기존 저장 글도 그대로 불러오기/미리보기 가능 |
-| 업로드 사진 (`imgs`) | 메모리 (새로고침 시 사라짐) | **기존과 동일하게 메모리에만 유지**. 기존에도 저장 글에 사진은 포함되지 않았음. 영구 보관은 Cloud Storage 로 다음 단계에서 권장 |
+| 업로드 사진 (`imgs`) | 메모리 (새로고침 시 사라짐) | STEP 2: 생성 시 서버가 Cloud Storage 에 저장 → 생성 이력·저장 글에서 다시 열면 표시 ([STORAGE.md](STORAGE.md)) |
 | 입력 중인 폼 | 메모리 | 기존과 동일 |
 | API 키 | localStorage | 보안상 삭제. 서버 Secret Manager 로 이전 |
 

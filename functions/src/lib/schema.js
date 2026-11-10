@@ -15,6 +15,15 @@ const COL = Object.freeze({
   SIGNUP_GRANTS: 'signupGrants',
 });
 
+/** 크레딧 버킷: 무료(가입 보너스·보상) 우선 사용, 유료(구매)는 그 다음 */
+const BUCKET = Object.freeze({ FREE: 'free', PAID: 'paid' });
+
+const GENERATION_STATUS = Object.freeze({
+  PROCESSING: 'processing', // 크레딧 예약(차감)됨, AI 호출 중
+  SUCCEEDED: 'succeeded',   // 차감 확정
+  FAILED: 'failed',         // 실패 → 크레딧 복구됨
+});
+
 /** 회원가입 무료 크레딧 */
 const SIGNUP_BONUS_CREDITS = 2;
 /** AI 생성 1회당 차감 크레딧 (STEP 2에서 사용) */
@@ -41,6 +50,8 @@ const REGION = 'asia-northeast3'; // 서울
 
 module.exports = {
   COL,
+  BUCKET,
+  GENERATION_STATUS,
   SIGNUP_BONUS_CREDITS,
   GENERATION_COST,
   LEDGER_TYPE,

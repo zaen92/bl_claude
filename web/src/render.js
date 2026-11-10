@@ -11,6 +11,8 @@ export function switchTab(tab) {
   g('tabResult').className = 'tab-btn' + (tab === 'result' ? ' on' : '');
   g('tabPreview').className = 'tab-btn' + (tab === 'preview' ? ' on' : '');
   g('tabSaved').className = 'tab-btn' + (tab === 'saved' ? ' on' : '');
+  g('tabHistory').className = 'tab-btn' + (tab === 'history' ? ' on' : '');
+  g('rightHistory').style.display = tab === 'history' ? 'flex' : 'none';
   g('rightResult').style.display = tab === 'result' ? 'flex' : 'none';
   g('rightPreview').style.display = tab === 'preview' ? 'flex' : 'none';
   g('rightSaved').style.display = tab === 'saved' ? 'flex' : 'none';
@@ -69,7 +71,7 @@ export function show(d) {
   g('rt').textContent = nl(d.reel || ''); g('th').textContent = nl(d.thumbnail || ''); g('rb5').className = 'rb on';
   g('gb').disabled = false;
   g('rightResult').scrollTop = 0;
-  if (state.imgs.length > 0) g('tabPreview').style.color = '#2d6a4f';
+  if ((state.previewPhotos || state.imgs).length > 0) g('tabPreview').style.color = '#2d6a4f';
 }
 
 export function renderPreview() {
@@ -78,7 +80,7 @@ export function renderPreview() {
     area.innerHTML = '<div class="preview-no"><div class="preview-no-ico">👀</div><div class="preview-no-txt">포스팅을 먼저 생성하면<br>사진이 합쳐진 미리보기를 볼 수 있어요</div></div>';
     return;
   }
-  const d = state.resultData, imgs = state.imgs;
+  const d = state.resultData, imgs = state.previewPhotos || state.imgs;
   const title = d.title_1 || g('ti').value || '제목 없음';
   const bodyRaw = nl(d.body || '');
   const tags = (d.hashtags || []).join(' ');

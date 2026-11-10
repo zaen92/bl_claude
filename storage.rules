@@ -1,0 +1,16 @@
+rules_version = '2';
+
+// 잰잇 블로그 스튜디오 Cloud Storage 보안 규칙
+// - 생성 사진은 Cloud Functions(Admin SDK)만 저장/삭제한다 → 사용자별 용량(users.storageBytes)을 서버가 관리
+// - 사용자는 자기 경로(users/{uid}/...)의 사진만 읽을 수 있다. 관리자는 전체 읽기.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/{allPaths=**} {
+      allow read: if request.auth != null && (request.auth.uid == uid || request.auth.token.admin == true);
+      allow write: if false;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

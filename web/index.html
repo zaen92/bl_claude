@@ -132,7 +132,8 @@
       <div class="err" id="eb" style="margin-bottom:10px"></div>
     </div>
     <div class="gen-wrap">
-      <button class="gen" id="gb" onclick="gen()">✨ Claude AI로 포스팅 생성하기</button>
+      <button class="gen" id="gb" onclick="gen(event)">✨ Claude AI로 포스팅 생성하기</button>
+      <div class="gen-hint" id="genHint">💳 생성 1회 = 1크레딧 · 실패하면 자동 복구돼요</div>
     </div>
   </div>
 
@@ -142,6 +143,7 @@
       <button class="tab-btn on" id="tabResult" onclick="switchTab('result')">📊 생성 결과</button>
       <button class="tab-btn" id="tabPreview" onclick="switchTab('preview')">👀 사진 미리보기</button>
       <button class="tab-btn" id="tabSaved" onclick="switchTab('saved')">💾 저장된 글 <span id="savedCount" style="background:var(--green);color:#fff;border-radius:99px;padding:1px 6px;font-size:10px;margin-left:4px"></span></button>
+      <button class="tab-btn" id="tabHistory" onclick="switchTab('history')">🕘 생성 이력</button>
     </div>
     <div class="right" id="rightResult" style="display:flex">
       <div class="empty" id="empty">
@@ -172,6 +174,14 @@
     </div>
     <div class="right" id="rightPreview" style="display:none">
       <div id="previewArea"></div>
+    </div>
+    <div class="right" id="rightHistory" style="display:none">
+      <div id="historyList"></div>
+      <div id="historyEmpty" style="text-align:center;padding:60px;color:#bbb">
+        <div style="font-size:40px;opacity:.4;margin-bottom:10px">🕘</div>
+        <div style="font-size:14px;color:#aaa" id="historyEmptyT">생성 이력이 없어요</div>
+        <div style="font-size:12px;margin-top:6px">생성한 글은 저장하지 않아도 여기에서 다시 볼 수 있어요</div>
+      </div>
     </div>
     <div class="right" id="rightSaved" style="display:none">
       <div id="legacyBar"></div>

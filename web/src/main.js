@@ -5,6 +5,7 @@ import * as A from './auth.js';
 import * as api from './api.js';
 import * as acct from './account.js';
 import * as P from './posts.js';
+import * as G from './generations.js';
 import { addImg } from './images.js';
 import { show, switchTab as baseSwitchTab, anim, cpId, cpTags, cpAll, cpTxt } from './render.js';
 
@@ -139,6 +140,16 @@ function updateStatus() {
   const c = p ? p.credits || 0 : null;
   dot.className = 'hd-dot' + (c ? ' on' : '');
   stx.textContent = c === null ? '불러오는 중…' : '크레딧 ' + c + '개';
+  updateGenHint();
+}
+function updateGenHint() {
+  const h = g('genHint'), p = state.profile;
+  if (!state.user) { h.innerHTML = '💳 로그인 후 이용 · 신규 회원 무료 2크레딧'; return; }
+  if (A.needsVerification(state.user)) { h.innerHTML = '📧 이메일 인증 후 무료 2크레딧이 지급돼요'; return; }
+  const c = p ? p.credits || 0 : 0;
+  h.innerHTML = c > 0
+    ? '💳 생성 1회 = <b>1크레딧</b> 차감 · 실패하면 자동 복구 · 남은 크레딧 <b>' + c + '개</b>'
+    : '🙏 크레딧을 모두 사용했어요 · 충전 기능은 곧 오픈 예정이에요';
 }
 
 /* ── 로그인 상태 변화 ── */
@@ -148,10 +159,13 @@ async function syncProfile(u) {
 A.onUser(async (u) => {
   unsubs.forEach((f) => f()); unsubs = [];
   state.user = u; state.profile = null; state.posts = []; ledger = [];
-  updateStatus(); updateSavedCount(); renderSavedList();
+  state.generations = [];
+  updateStatus(); updateSavedCount(); renderSavedList(); renderHistory();
   if (!u) return;
   await syncProfile(u);
   unsubs.push(acct.subscribeProfile(u.uid, (p) => { state.profile = p; updateStatus(); renderAccount(); }));
+  unsubs.push(G.subscribeGenerations(u.uid, (list) => { state.generations = list; renderHistory(); }));
+  resumePending(u.uid);
   unsubs.push(acct.subscribeLedger(u.uid, (l) => { ledger = l; renderAccount(); }));
   unsubs.push(P.subscribePosts(u.uid, (posts) => { state.posts = posts; updateSavedCount(); renderSavedList(); }));
 });
@@ -159,34 +173,203 @@ A.onUser(async (u) => {
 /* ── 입력 선택 (기존 st/sv) ── */
 function st(b, t) { document.querySelectorAll('.tb').forEach((x) => x.classList.remove('on')); b.classList.add('on'); state.sT = t; }
 function sv(b, v) { document.querySelectorAll('.vb').forEach((x) => x.classList.remove('on')); b.classList.add('on'); state.sV = v; }
-function switchTab(tab) { baseSwitchTab(tab); if (tab === 'saved') renderSavedList(); }
+function switchTab(tab) { baseSwitchTab(tab); if (tab === 'saved') renderSavedList(); if (tab === 'history') renderHistory(); }
 
 /* ── 생성 ── */
-async function gen() {
+let watchUnsub = null;
+let watchTimer = null;
+function stopWatch() { if (watchUnsub) { watchUnsub(); watchUnsub = null; } if (watchTimer) { clearInterval(watchTimer); watchTimer = null; } }
+
+function showError(text, { retry = false, info = false } = {}) {
+  const eb = g('eb');
+  eb.innerHTML = '';
+  const t = document.createElement('div'); t.textContent = text; eb.appendChild(t);
+  if (retry) {
+    const b = document.createElement('button'); b.className = 'err-retry'; b.textContent = '🔄 다시 시도'; b.onclick = () => { lastFinishedAt = 0; gen(); };
+    eb.appendChild(b);
+  }
+  eb.className = 'err on' + (info ? ' info' : '');
+  try { eb.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { /* ignore */ }
+}
+function endLoading() {
+  g('load').className = 'load'; g('gb').disabled = false; state.inFlight = false; lastFinishedAt = Date.now();
+  if (!state.resultData) g('empty').style.display = '';
+}
+function startLoading(msg) {
+  g('gb').disabled = true; g('empty').style.display = 'none'; g('load').className = 'load on';
+  ['rb1', 'rb2', 'rb3', 'rb4', 'rb5', 'rb6'].forEach((id) => { g(id).className = 'rb'; });
+  g('sb').textContent = msg || ''; g('lb').style.width = '0%'; anim();
+  switchTab('result');
+}
+
+/** 생성 결과(서버 응답 또는 generations 문서)를 화면에 표시 */
+async function showGeneration(gen, { localPhotos } = {}) {
+  state.resultData = gen.result;
+  state.resultMeta = { generationId: gen.generationId || gen.id, type: (gen.input && gen.input.type) || state.sT, photos: (gen.photos || []).map((p) => ({ path: p.path, index: p.index })) };
+  state.previewPhotos = localPhotos || [];
+  show(gen.result);
+  if (!localPhotos && state.resultMeta.photos.length) {
+    const meta = state.resultMeta;
+    const urls = await G.photoUrls(meta.photos);
+    if (state.resultMeta !== meta) return;
+    state.previewPhotos = urls.filter(Boolean);
+    if (g('rightPreview').style.display !== 'none') renderPreview();
+    g('tabPreview').style.color = '#2d6a4f';
+  }
+}
+
+function finishWithFailure(gen) {
+  endLoading();
+  const msg = (gen.error && gen.error.message) || '생성에 실패했어요.';
+  showError('❌ ' + msg + (gen.charge && gen.charge.status === 'refunded' || gen.refunded ? ' 차감된 1크레딧은 자동으로 복구됐어요.' : ''), { retry: !gen.error || gen.error.retryable !== false });
+}
+
+/** 결과를 모르는 생성 건(네트워크 끊김·새로고침)을 서버 기록으로 추적 */
+function trackGeneration(uid, generationId, { localPhotos } = {}) {
+  stopWatch();
+  let seen = false;
+  const startedAt = Date.now();
+  const check = async () => {
+    try {
+      const s = await api.getGenerationStatus(generationId); // lease 가 지난 건은 서버가 이 자리에서 복구
+      if (s.status !== 'processing') { /* onSnapshot 이 처리 */ }
+    } catch (e) {
+      // 문서가 없음 = 요청이 서버에 도달하지 않음 → 차감도 없음
+      if (e.code === 'functions/not-found' && Date.now() - startedAt > 8000) {
+        stopWatch(); G.clearPending(uid); state.currentRequestId = null; endLoading();
+        showError('⚠️ 요청이 서버에 전달되지 않았어요. 크레딧은 차감되지 않았어요.', { retry: true });
+      }
+    }
+  };
+  watchUnsub = G.watchGeneration(generationId, async (doc) => {
+    if (!doc) return;
+    seen = true;
+    if (doc.status === 'processing') { g('lst').textContent = '⏳ 서버에서 생성 중이에요...'; return; }
+    stopWatch(); G.clearPending(uid); state.currentRequestId = null;
+    if (doc.status === 'succeeded') {
+      g('eb').className = 'err'; endLoading();
+      await showGeneration(doc, { localPhotos });
+    } else {
+      finishWithFailure(doc);
+    }
+  });
+  watchTimer = setInterval(check, 10000);
+  setTimeout(check, 2500);
+}
+
+async function resumePending(uid) {
+  const p = G.loadPending(uid);
+  if (!p || !p.generationId) return;
+  state.inFlight = true;
+  state.currentRequestId = p.clientRequestId;
+  startLoading('🔄 이전 생성 요청의 상태를 확인하고 있어요...\n');
+  trackGeneration(uid, p.generationId);
+}
+
+let lastFinishedAt = 0;
+async function gen(ev) {
+  // 더블클릭 방지: 진행 중이거나, 더블클릭의 두 번째 클릭이거나, 방금(1초 내) 끝난 직후의 클릭은 무시
+  if (state.inFlight || (ev && ev.detail > 1) || Date.now() - lastFinishedAt < 1000) return;
   const eb = g('eb'); eb.className = 'err';
   if (!state.user) { openAccount(); return; }
   if (A.needsVerification(state.user)) { openAccount(); return; }
   const t = g('ti').value.trim(), m = g('mi').value.trim(), c = g('ci').value.trim(), info = g('ii').value.trim();
-  if (!t || !state.sT || !c || !state.sV) { eb.textContent = '⚠️ 제목, 글 유형, 내용, 분량을 모두 입력/선택해주세요!'; eb.className = 'err on'; return; }
-  g('gb').disabled = true; g('empty').style.display = 'none'; g('load').className = 'load on';
-  ['rb1', 'rb2', 'rb3', 'rb4', 'rb5', 'rb6'].forEach((id) => { g(id).className = 'rb'; });
-  const sb = g('sb'); sb.textContent = ''; g('lb').style.width = '0%'; anim();
-  switchTab('result');
+  if (!t || !state.sT || !c || !state.sV) { showError('⚠️ 제목, 글 유형, 내용, 분량을 모두 입력/선택해주세요!'); return; }
+  if (state.profile && (state.profile.credits || 0) < 1) {
+    showError('🙏 크레딧을 모두 사용했어요. 크레딧 충전 기능은 곧 오픈 예정이에요. 조금만 기다려주세요!', { info: true });
+    return;
+  }
+  state.inFlight = true;
+  const uid = state.user.uid;
+  // 결과가 확정되기 전 재시도는 같은 멱등 키 → 서버가 중복 실행·차감하지 않음
+  const clientRequestId = state.currentRequestId || api.newRequestId();
+  state.currentRequestId = clientRequestId;
+  const generationId = uid + '_' + clientRequestId;
+  const localPhotos = state.imgs.slice();
+  G.savePending(uid, { generationId, clientRequestId, startedAt: Date.now() });
+  state.resultData = null;
+  startLoading();
+  const sb = g('sb');
   try {
     const res = await api.generatePost(
-      { title: t, type: state.sT, content: c, memo: m, info, volume: state.sV, images: state.imgs.slice(), clientRequestId: api.newRequestId() },
+      { title: t, type: state.sT, content: c, memo: m, info, volume: state.sV, images: localPhotos, clientRequestId },
       (ch) => {
         if (ch.type === 'status') sb.textContent += ch.message + '\n';
         else if (ch.type === 'text') sb.textContent += ch.delta;
         sb.scrollTop = sb.scrollHeight;
       },
     );
-    state.resultData = res.result;
-    state.resultMeta = { generationId: res.mock ? null : res.generationId, type: state.sT };
-    show(res.result);
+    if (res.status === 'processing') { trackGeneration(uid, generationId, { localPhotos }); return; }
+    G.clearPending(uid); state.currentRequestId = null;
+    if (res.status === 'failed') { finishWithFailure(res); return; }
+    endLoading();
+    await showGeneration(res, { localPhotos });
   } catch (e) {
-    g('load').className = 'load'; eb.textContent = '❌ ' + api.apiErrorMessage(e); eb.className = 'err on'; g('gb').disabled = false; g('empty').style.display = '';
+    if (api.isDefinitiveError(e)) {
+      G.clearPending(uid); state.currentRequestId = null; endLoading();
+      const d = e.details || {};
+      showError('❌ ' + api.apiErrorMessage(e), { retry: d.retryable === true || (d.refunded && d.retryable !== false) });
+    } else {
+      // 네트워크 끊김 등: 서버에서는 계속 처리 중일 수 있음 → 기록을 추적 (같은 키로만 재시도)
+      g('lst').textContent = '📡 연결이 끊겼어요. 생성 상태를 확인하는 중...';
+      showError('📡 연결이 불안정해요. 서버의 생성 결과를 확인하고 있어요. (중복 차감되지 않아요)', { info: true });
+      trackGeneration(uid, generationId, { localPhotos });
+    }
   }
+}
+
+/* ── 생성 이력 ── */
+function renderHistory() {
+  const list = g('historyList'), empty = g('historyEmpty');
+  list.innerHTML = '';
+  if (!state.user) { g('historyEmptyT').textContent = '로그인하면 생성 이력을 볼 수 있어요'; empty.style.display = 'block'; return; }
+  g('historyEmptyT').textContent = '생성 이력이 없어요';
+  const items = state.generations;
+  if (!items.length) { empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  items.forEach((it) => {
+    const inp = it.input || {};
+    const card = document.createElement('div'); card.style.cssText = 'background:#fff;border:1px solid #e4e1dc;border-radius:12px;padding:16px;margin-bottom:10px;';
+    const h = document.createElement('div'); h.style.cssText = 'font-size:14px;font-weight:700;color:#1a1a1a;line-height:1.5;margin-bottom:4px';
+    h.textContent = (it.result && it.result.title_1) || inp.title || '제목 없음';
+    const meta = document.createElement('div'); meta.style.cssText = 'font-size:11px;color:#888;margin-bottom:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+    const st = document.createElement('span');
+    if (it.status === 'succeeded') { st.className = 'hst ok'; st.textContent = '✅ 완료 · 1크레딧 사용'; }
+    else if (it.status === 'processing') { st.className = 'hst run'; st.textContent = '⏳ 생성 중'; }
+    else { st.className = 'hst fail'; st.textContent = '❌ 실패 · 크레딧 복구됨'; }
+    const when = it.createdAt && it.createdAt.toDate ? it.createdAt.toDate().toLocaleString('ko-KR') : '';
+    const tx = document.createElement('span'); tx.textContent = when + (inp.type ? ' · ' + inp.type : '') + (inp.imageCount ? ' · 사진 ' + inp.imageCount + '장' : '');
+    meta.appendChild(st); meta.appendChild(tx);
+    card.appendChild(h); card.appendChild(meta);
+    if (it.status === 'failed' && it.error) {
+      const em = document.createElement('div'); em.style.cssText = 'font-size:12px;color:#dc3545;margin-bottom:10px'; em.textContent = it.error.message; card.appendChild(em);
+    }
+    const btns = document.createElement('div'); btns.style.cssText = 'display:flex;gap:6px';
+    if (it.status === 'succeeded') {
+      const lb = document.createElement('button');
+      lb.style.cssText = 'flex:1;padding:9px;background:#2d6a4f;color:#fff;border:none;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
+      lb.textContent = '📄 불러오기';
+      lb.onclick = () => { switchTab('result'); showGeneration(it); };
+      btns.appendChild(lb);
+    }
+    const rb = document.createElement('button');
+    rb.style.cssText = 'flex:1;padding:9px;background:#fff;color:#2d6a4f;border:1.5px solid #2d6a4f;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
+    rb.textContent = '✏️ 입력 다시 쓰기';
+    rb.onclick = () => refillForm(inp);
+    btns.appendChild(rb);
+    card.appendChild(btns);
+    list.appendChild(card);
+  });
+}
+
+/** 이력의 입력값으로 왼쪽 폼 채우기 (사진은 다시 선택) */
+function refillForm(inp) {
+  g('ti').value = inp.title || ''; g('mi').value = inp.memo || ''; g('ci').value = inp.content || ''; g('ii').value = inp.info || '';
+  document.querySelectorAll('.tb').forEach((b) => { if (b.textContent.trim().endsWith(inp.type)) st(b, inp.type); });
+  const vi = { short: 0, normal: 1, long: 2 }[inp.volume];
+  if (vi != null) sv(document.querySelectorAll('.vb')[vi], inp.volume);
+  state.currentRequestId = null;
+  g('ti').focus();
 }
 
 function reset() {
@@ -194,7 +377,8 @@ function reset() {
   g('pg').innerHTML = ''; g('pcnt').textContent = ''; g('cnote').className = 'cn';
   document.querySelectorAll('.tb').forEach((b) => b.classList.remove('on'));
   document.querySelectorAll('.vb').forEach((b) => b.classList.remove('on'));
-  state.sT = ''; state.sV = ''; state.imgs = []; state.resultData = null; state.resultMeta = null;
+  if (state.inFlight) return; // 생성 중에는 초기화하지 않음
+  state.sT = ''; state.sV = ''; state.imgs = []; state.resultData = null; state.resultMeta = null; state.previewPhotos = null; state.currentRequestId = null;
   ['rb1', 'rb2', 'rb3', 'rb4', 'rb5', 'rb6'].forEach((id) => { g(id).className = 'rb'; });
   g('load').className = 'load'; g('eb').className = 'err'; g('gb').disabled = false; g('empty').style.display = '';
   g('rightResult').scrollTop = 0; switchTab('result');
@@ -214,6 +398,7 @@ async function savePost() {
       type: (state.resultMeta && state.resultMeta.type) || state.sT,
       data: state.resultData,
       generationId: state.resultMeta && state.resultMeta.generationId,
+      photos: (state.resultMeta && state.resultMeta.photos) || [],
     });
     btn.textContent = '✅ 저장됨!'; btn.style.background = '#388e3c'; btn.style.color = '#fff'; btn.style.borderColor = '#388e3c';
     setTimeout(() => { btn.textContent = '💾 저장'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }, 2000);
@@ -270,7 +455,7 @@ function renderSavedList() {
     const h = document.createElement('div'); h.style.cssText = 'font-size:14px;font-weight:700;color:#1a1a1a;line-height:1.5;margin-bottom:4px'; h.textContent = post.title;
     const meta = document.createElement('div'); meta.style.cssText = 'font-size:11px;color:#888';
     const date = post.legacySavedAt || (post.createdAt && post.createdAt.toDate ? post.createdAt.toDate().toLocaleString('ko-KR') : '');
-    meta.textContent = date + (post.type ? ' · ' + post.type : '');
+    meta.textContent = date + (post.type ? ' · ' + post.type : '') + (post.photos && post.photos.length ? ' · 📸 ' + post.photos.length + '장' : '');
     titleDiv.appendChild(h); titleDiv.appendChild(meta); header.appendChild(titleDiv); card.appendChild(header);
 
     const bodyPrev = document.createElement('div');
@@ -289,7 +474,10 @@ function renderSavedList() {
     const loadBtn = document.createElement('button');
     loadBtn.style.cssText = 'flex:1;padding:9px;background:#2d6a4f;color:#fff;border:none;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
     loadBtn.textContent = '📄 불러오기';
-    loadBtn.onclick = () => { state.resultData = data; state.resultMeta = { generationId: post.generationId || null, type: post.type }; show(data); switchTab('result'); };
+    loadBtn.onclick = () => {
+      switchTab('result');
+      showGeneration({ id: post.generationId || null, result: data, input: { type: post.type }, photos: post.photos || [] });
+    };
     const cpBtn = document.createElement('button');
     cpBtn.style.cssText = 'flex:1;padding:9px;background:#fff;color:#2d6a4f;border:1.5px solid #2d6a4f;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
     cpBtn.textContent = '📋 복사';

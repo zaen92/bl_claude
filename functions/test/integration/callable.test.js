@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('비로그인: 모든 callable 이 unauthenticated', async () => {
-  for (const name of ['ensureUserProfile', 'generatePost', 'createOrder', 'confirmPayment', 'adminAdjustCredits']) {
+  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits']) {
     const r = await call(name, {});
     assert.equal(r.status, 401, name);
     assert.equal(r.body.error.status, 'UNAUTHENTICATED', name);
@@ -64,16 +64,57 @@ test('이메일 가입 → 미인증 0크레딧 → 인증 후 2크레딧 (동�
   assert.equal(again.body.result.credits, 2);
 });
 
-test('generatePost: 로그인 사용자 입력 검증 + 에뮬레이터 모의 결과', async () => {
-  const u = await signUp('gen@x.com');
+const GOOD = (id) => ({ title: '세비야 맛집', type: '맛집', content: '살모레호 맛있음', volume: 'normal', images: ['data:image/jpeg;base64,/9j/AAAA', 'data:image/jpeg;base64,/9j/BBBB'], clientRequestId: id });
+
+test('generatePost: 이메일 미인증 사용자는 생성 불가 (차감 없음)', async () => {
+  const u = await signUp('unverified@x.com');
   await call('ensureUserProfile', {}, u.idToken);
-  const bad = await call('generatePost', { title: '', type: '맛집', content: 'x', volume: 'short', clientRequestId: 'req_abcdefgh' }, u.idToken);
+  const r = await call('generatePost', GOOD('req_unverified1'), u.idToken);
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error.status, 'FAILED_PRECONDITION');
+  assert.equal(r.body.error.details.reason, 'email_not_verified');
+});
+
+test('generatePost(에뮬레이터 mock AI): 2회 성공 → 3회째 차단, 상태 조회, 타인 조회 차단, 응답에 키 없음', async () => {
+  const u = await signUp('gen@x.com');
+  await verifyEmail(u.uid);
+  await call('ensureUserProfile', {}, u.idToken);
+  const bad = await call('generatePost', { ...GOOD('req_badinput1'), title: '' }, u.idToken);
   assert.equal(bad.status, 400);
   assert.equal(bad.body.error.status, 'INVALID_ARGUMENT');
-  const good = await call('generatePost', { title: '세비야 맛집', type: '맛집', content: '살모레호 맛있음', volume: 'normal', images: ['data:image/jpeg;base64,AAAA'], clientRequestId: 'req_abcdefgh' }, u.idToken);
-  assert.equal(good.status, 200);
-  assert.equal(good.body.result.mock, true);
-  assert.ok(good.body.result.result.body.includes('[사진1]'));
+
+  const r1 = await call('generatePost', GOOD('req_gen_00001'), u.idToken);
+  assert.equal(r1.status, 200, JSON.stringify(r1.body));
+  const g1 = r1.body.result;
+  assert.deepEqual([g1.status, g1.mock, g1.creditsRemaining, g1.photos.length], ['succeeded', true, 1, 2]);
+  assert.ok(g1.result.body.includes('[사진1]') && g1.result.body.includes('[사진2]'));
+  assert.ok(!JSON.stringify(r1.body).match(/sk-ant|x-api-key|ANTHROPIC/i));
+
+  // 같은 요청 재전송 → 중복 차감 없이 같은 결과
+  const dup = await call('generatePost', GOOD('req_gen_00001'), u.idToken);
+  assert.deepEqual([dup.body.result.duplicate, dup.body.result.generationId], [true, g1.generationId]);
+
+  const r2 = await call('generatePost', GOOD('req_gen_00002'), u.idToken);
+  assert.equal(r2.body.result.creditsRemaining, 0);
+  const r3 = await call('generatePost', GOOD('req_gen_00003'), u.idToken);
+  assert.equal(r3.body.error.status, 'FAILED_PRECONDITION');
+  assert.equal(r3.body.error.details.reason, 'insufficient_credits');
+
+  const st = await call('getGenerationStatus', { generationId: g1.generationId }, u.idToken);
+  assert.equal(st.body.result.status, 'succeeded');
+  const other = await signUp('other@x.com');
+  const st2 = await call('getGenerationStatus', { generationId: g1.generationId }, other.idToken);
+  assert.equal(st2.body.error.status, 'NOT_FOUND');
+});
+
+test('generatePost(mock AI 오류): 실패 응답에 크레딧 복구 안내 + 잔액 유지', async () => {
+  const u = await signUp('fail@x.com');
+  await verifyEmail(u.uid);
+  await call('ensureUserProfile', {}, u.idToken);
+  const r = await call('generatePost', { ...GOOD('req_fail_0001'), memo: '[[mock:error]]' }, u.idToken);
+  assert.equal(r.body.error.status, 'UNAVAILABLE');
+  assert.deepEqual([r.body.error.details.refunded, r.body.error.details.creditsRemaining], [true, 2]);
+  assert.match(r.body.error.message, /복구/);
 });
 
 test('createOrder / confirmPayment: 인터페이스만 존재 (unimplemented)', async () => {

@@ -61,12 +61,13 @@ service cloud.firestore {
 
     // ── posts/{postId} : 사용자가 저장한 글 ───────────────
     function validPost(d) {
-      return d.keys().hasOnly(['uid', 'title', 'type', 'data', 'generationId', 'legacyId', 'legacySavedAt', 'createdAt', 'updatedAt'])
+      return d.keys().hasOnly(['uid', 'title', 'type', 'data', 'photos', 'generationId', 'legacyId', 'legacySavedAt', 'createdAt', 'updatedAt'])
         && d.keys().hasAll(['uid', 'title', 'data', 'createdAt', 'updatedAt'])
         && d.uid == request.auth.uid
         && d.title is string && d.title.size() <= 300
         && (!('type' in d) || d.type is string && d.type.size() <= 20)
         && d.data is map
+        && (!('photos' in d) || d.photos is list && d.photos.size() <= 10)
         && (!('generationId' in d) || d.generationId == null || d.generationId is string)
         && (!('legacyId' in d) || d.legacyId is int || d.legacyId is string)
         && d.updatedAt == request.time;

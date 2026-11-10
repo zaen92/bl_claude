@@ -14,3 +14,6 @@ web/.env.local
 service-account*.json
 .DS_Store
 tests/e2e/screenshots/
+
+# 비밀이 아닌 Functions 설정은 커밋 (비밀값은 Secret Manager / .secret.local)
+!functions/.env

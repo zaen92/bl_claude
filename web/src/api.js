@@ -11,32 +11,41 @@ export async function ensureProfile() {
 }
 
 /**
- * AI 포스팅 생성. onChunk({type:'status'|'text', ...}) 로 스트리밍 진행상황 전달.
- * @returns {Promise<{generationId:string,result:object,naver:object|null,creditsRemaining:number,mock:boolean}>}
+ * AI 포스팅 생성 (서버에서 1크레딧 예약 → Claude 호출 → 확정/복구).
+ * onChunk({type:'status'|'text', ...}) 로 진행상황 스트리밍.
  */
 export async function generatePost(input, onChunk) {
-  const callable = fn('generatePost', 300_000);
+  const callable = fn('generatePost', 310_000);
   if (typeof callable.stream === 'function') {
     const { stream, data } = await callable.stream(input);
-    for await (const chunk of stream) onChunk && onChunk(chunk);
+    try {
+      for await (const chunk of stream) onChunk && onChunk(chunk);
+    } catch (e) {
+      // 스트림 오류는 아래 data 에서 같은 오류로 다시 던져진다
+    }
     return await data;
   }
   return (await callable(input)).data;
 }
 
+/** 생성 상태 조회 (서버가 멈춘 건을 이 자리에서 복구) */
+export async function getGenerationStatus(generationId) {
+  return (await fn('getGenerationStatus')({ generationId })).data;
+}
+
 const FN_ERR = {
   'functions/unauthenticated': '로그인이 필요해요.',
   'functions/permission-denied': '권한이 없어요.',
-  'functions/resource-exhausted': '크레딧이 부족해요. 충전 후 이용해주세요.',
-  'functions/failed-precondition': '크레딧이 부족해요. 충전 후 이용해주세요.',
-  'functions/deadline-exceeded': '응답이 지연되고 있어요. 잠시 후 다시 시도해주세요.',
-  'functions/unavailable': '서버에 연결할 수 없어요. 잠시 후 다시 시도해주세요.',
+  'functions/deadline-exceeded': '응답이 지연되고 있어요.',
 };
 export function apiErrorMessage(e) {
   if (!e) return '오류가 발생했어요.';
-  if (e.code === 'functions/invalid-argument' || e.code === 'functions/unimplemented') return e.message;
-  return FN_ERR[e.code] || e.message || '오류가 발생했어요.';
+  if (e.details && e.details.reason) return e.message; // 서버가 만든 사용자용 메시지
+  if (['functions/invalid-argument', 'functions/unimplemented', 'functions/failed-precondition', 'functions/resource-exhausted'].includes(e.code)) return e.message;
+  return FN_ERR[e.code] || '서버와 연결이 원활하지 않아요.';
 }
+/** 서버가 결과를 확정해 돌려준 오류인지 (아니면 네트워크 문제로 결과를 모르는 상태) */
+export const isDefinitiveError = (e) => !!(e && e.details && e.details.reason) || ['functions/invalid-argument', 'functions/unauthenticated', 'functions/permission-denied', 'functions/unimplemented'].includes(e && e.code);
 
 export function newRequestId() {
   const a = new Uint8Array(12);

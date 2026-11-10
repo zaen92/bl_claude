@@ -2,7 +2,8 @@
 const { POST_TYPES, VOLUMES } = require('../lib/schema');
 
 const MAX_IMAGES = 10;
-const MAX_IMAGE_DATAURL_LEN = 2_000_000; // 클라이언트가 1400px/JPEG 0.82 로 압축 → 보통 200~500KB
+const MAX_IMAGE_DATAURL_LEN = 2_000_000; // 장당 약 1.5MB (클라이언트가 1400px/JPEG 0.82 로 압축 → 보통 200~500KB)
+const MAX_TOTAL_DATAURL_LEN = 12_000_000; // 전체 약 9MB (callable 요청 한도 32MB 이내)
 
 function str(v, { name, min = 0, max }) {
   if (v == null) v = '';
@@ -39,8 +40,9 @@ function validateGenerateInput(data) {
       throw new Error('사진 형식 또는 크기가 올바르지 않아요.');
     }
   }
+  if (imgs.reduce((n, im) => n + im.length, 0) > MAX_TOTAL_DATAURL_LEN) throw new Error('사진 전체 용량이 너무 커요. 장수를 줄여주세요.');
   out.images = imgs;
   return out;
 }
 
-module.exports = { validateGenerateInput, MAX_IMAGES };
+module.exports = { validateGenerateInput, MAX_IMAGES, MAX_IMAGE_DATAURL_LEN, MAX_TOTAL_DATAURL_LEN };
