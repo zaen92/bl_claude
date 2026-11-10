@@ -64,10 +64,29 @@ test('classifyAiError: 상태코드별 사유', () => {
   assert.equal(classifyAiError(new AiError('ai_refusal')).retryable, false);
 });
 
-test('estimateCostUsd: sonnet-4-6 정가 기준', () => {
+test('estimateCostUsd: 공식 정가 (sonnet-4-6 / sonnet-5-5 캐시 0.05배 / haiku-5-5 장문 단가 / 날짜 ID)', () => {
   // 입력 10,000 × $3/M + 출력 2,000 × $15/M + 검색 2 × $0.01 = 0.03 + 0.03 + 0.02
-  assert.deepEqual(estimateCostUsd('claude-sonnet-4-6', { inputTokens: 10000, outputTokens: 2000, webSearchRequests: 2 }), { usd: 0.08, known: true });
-  assert.deepEqual(estimateCostUsd('unknown-model', { inputTokens: 1 }), { usd: null, known: false });
+  const c = estimateCostUsd('claude-sonnet-4-6', { inputTokens: 10000, outputTokens: 2000, webSearchRequests: 2 });
+  assert.equal(c.usd, 0.08);
+  assert.deepEqual(c.breakdown, { input: 0.03, output: 0.03, cacheWrite: 0, cacheRead: 0, webSearch: 0.02 });
+  // 캐시: 쓰기 1.25배, 읽기 sonnet-4-6 0.1배 / sonnet-5-5 0.05배
+  assert.equal(estimateCostUsd('claude-sonnet-4-6', { cacheCreationInputTokens: 1e6, cacheReadInputTokens: 1e6 }).usd, 3.75 + 0.3);
+  assert.equal(estimateCostUsd('claude-sonnet-5-5', { cacheReadInputTokens: 1e6 }).usd, 0.1);
+  assert.equal(estimateCostUsd('claude-haiku-5-5', { inputTokens: 100_000 }).usd, 0.01);
+  assert.equal(estimateCostUsd('claude-haiku-5-5', { inputTokens: 100_001 }).usd, 0.050001);
+  assert.equal(estimateCostUsd('claude-haiku-4-5-20251001', { outputTokens: 1e6 }).usd, 5);
+  assert.deepEqual(estimateCostUsd('unknown-model', { inputTokens: 1 }), { usd: null, known: false, breakdown: null });
+});
+
+test('checkResult: 결과 형식·품질 검사', () => {
+  const { checkResult } = require('../../src/ai/validateResult');
+  const { mockGeneration } = require('../../src/ai/mock');
+  const good = { ...mockGeneration({ title: 't', type: '맛집', content: 'c', imageCount: 2 }) };
+  good.body = '안녕하세요! 여행블로거 잰잇입니다 ^ㅎ^\\n[사진1]\\n[사진2]\\n' + '가'.repeat(900) + '\\n💡잰잇의 팁\\n오늘 포스팅이 도움 되셨다면 공감이랑 서이추 꾸욱 눌러주세요!';
+  assert.deepEqual(checkResult(good, { volume: 'short', imageCount: 2 }).flags, []);
+  const bad = { ...good, body: '**굵게** 짧음', hashtags: ['태그'] };
+  const f = checkResult(bad, { volume: 'long', imageCount: 1 }).flags;
+  for (const x of ['body_too_short', 'missing_greeting', 'markdown_in_body', 'missing_photo_marker:1', 'few_hashtags', 'hashtag_format']) assert.ok(f.includes(x), x);
 });
 
 test('planChange: 무료 크레딧 우선 차감, 부족 시 거부', () => {

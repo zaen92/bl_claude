@@ -25,6 +25,11 @@ function createMockClient() {
   const calls = [];
   const client = {
     calls,
+    models: {
+      async retrieve(id) {
+        return { id, type: 'model', display_name: id, max_input_tokens: 1000000, max_tokens: 128000, capabilities: { server_tools: { supported: true, web_search: { supported: true } } } };
+      },
+    },
     messages: {
       stream(params, opts = {}) {
         calls.push(params);
@@ -43,6 +48,13 @@ function createMockClient() {
             if (opts.signal) opts.signal.addEventListener('abort', () => { clearTimeout(t); const e = new Error('aborted'); e.name = 'AbortError'; j(e); });
           });
           if (memo.includes('[[mock:error]]')) throw new MockApiError(500, 'InternalServerError');
+          yield { type: 'message_start', message: { id: 'msg_mock', model: params.model, usage: { input_tokens: 1800 + imageCount * 1500, output_tokens: 1 } } };
+          if (memo.includes('[[mock:midstream]]')) {
+            // 응답 도중 끊김 (과금이 시작된 뒤의 오류)
+            yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '{"title_1":"' } };
+            yield { type: 'message_delta', delta: {}, usage: { output_tokens: 120 } };
+            const e = new Error('overloaded'); e.type = 'overloaded_error'; e.name = 'APIError'; throw e;
+          }
           if (memo.includes('[[mock:overloaded]]')) throw new MockApiError(529, 'InternalServerError');
           if (memo.includes('[[mock:auth]]')) throw new MockApiError(401, 'AuthenticationError');
           let text = '';

@@ -17,3 +17,4 @@ tests/e2e/screenshots/
 
 # 비밀이 아닌 Functions 설정은 커밋 (비밀값은 Secret Manager / .secret.local)
 !functions/.env
+cost-reports/

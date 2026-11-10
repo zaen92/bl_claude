@@ -1,38 +1,59 @@
-# AI 생성 비용 기록 · 측정
+# AI 생성 비용 기록 · 측정 · 손익 분석
 
-## 자동 기록 (생성마다)
-`generations/{id}` 에 저장 (관리자만 전체 조회 가능, 사용자는 본인 것만):
-- `usage.inputTokens / outputTokens / cacheCreationInputTokens / cacheReadInputTokens / webSearchRequests`
-- `costUsd` — `functions/src/config/pricing.js` 정가 × 사용량 (예상치)
-- `model`, `latencyMs`, `apiRequestCount`(pause_turn 이어쓰기 포함)
-- Cloud Logging: `generation succeeded` 로그에 generationId·사용량·비용 (입력 내용·이메일·키는 기록하지 않음)
+> 아래 1회당 비용은 **추정치**입니다. 실제 키로 측정하기 전에는 상품 가격을 확정하지 마세요 ([LIVE_VERIFICATION.md](LIVE_VERIFICATION.md) 6절).
 
-## claude-sonnet-4-6 정가 (2026-11 기준)
-입력 $3 / 1M 토큰 · 출력 $15 / 1M 토큰 · 웹 검색 $10 / 1,000회
+## 단가 (공식 문서 확인: 2026-11-10, `functions/src/config/pricing.js`)
+| 모델 | 입력 / 출력 (1M 토큰) | 캐시 읽기 | 사진 1장 최대 토큰 |
+|---|---|---|---|
+| **claude-sonnet-4-6** (기본) | $3 / $15 | $0.30 | 1,568 |
+| claude-sonnet-5-5 | $2 / $10 | $0.10 | 4,784 (1400x1050 사진은 약 1,900) |
+| claude-opus-5-5 | $4 / $20 | $0.20 | 4,784 |
+| claude-haiku-5-5 | $0.10 / $0.50 (100K 초과 시 $0.50 / $2.50) | $0.01 | 4,784 |
 
-### 1회 예상 (실측 전 추정치)
+- 웹 검색 $10 / 1,000회 + 검색 결과는 입력 토큰. 오류 난 검색은 과금되지 않음
+- 5.x 모델은 tokenizer 가 달라 같은 한국어 글도 토큰 수가 약 30% 많음 → 단가가 낮아도 실측 비교 필요
+- `claude-sonnet-4-6` 은 은퇴 예정일이 2027-02-17 이후로 공지됨 → 출시 후 수개월 내 모델 교체 검토 필요
+
+## 1회 예상 (claude-sonnet-4-6, 실측 전 추정)
 | 항목 | 가정 | 비용 |
 |---|---|---|
-| 입력 | 프롬프트 ~1.5K + 사진 5장 × ~1.6K + 웹검색 결과 ~8K ≈ 17K 토큰 | ≈ $0.05 |
-| 출력 | 본문 1,500~1,800자 + 제목·키워드·해시태그·릴스·썸네일 JSON ≈ 3~4K 토큰 | ≈ $0.05~0.06 |
-| 웹 검색 | 2~3회 | ≈ $0.02~0.03 |
-| **합계** | | **≈ $0.10~0.15 (약 140~210원)** |
+| 입력 | 프롬프트 ~1.8K + 사진 N × 1,568 + 웹 검색 결과 ~5~15K | 사진 0장 ≈ $0.02~0.05 / 10장 ≈ $0.07~0.10 |
+| 출력 | 분량별 본문 + JSON (짧은 ~2.5K · 보통 ~4K · 긴 ~5K 토큰) | $0.04~0.08 |
+| 웹 검색 | 1~5회 (`max_uses` 5) | $0.01~0.05 |
+| **합계** | | **평균 ≈ $0.10~0.15, 최대(사진 10장·긴 글·검색 5회) ≈ $0.25 내외** |
 
-> ⚠️ 위 값은 추정입니다. 실제 키로 아래 방법으로 측정한 뒤 크레딧 가격(STEP 3)을 정하세요. 웹 검색 결과 토큰은 검색어·결과에 따라 크게 달라집니다.
+## 자동 기록
+- `generationMetrics/{generationId}` (관리자 전용, 입력 내용 없음): 모델, 사진 장수·용량, 분량, `usage`(입력/출력/캐시/웹검색), `costUsd`, `costBreakdown`(입력·출력·캐시·검색), `latencyMs`, `computeUsdEst`(서버 비용 추정), `billing`, `qualityFlags`
+- `opsDaily/{YYYY-MM-DD}` (KST): 성공/실패 수, `aiCostUsd`, `aiCostUsdFailed`, 토큰 합계, 검색 수, `computeUsdEst`, `photoBytesAdded`, 모델별 건수·비용 → 일일 비용 상한 판단에도 사용
+
+### 실패한 호출의 비용 (`billing` 필드)
+| 값 | 의미 | 근거 |
+|---|---|---|
+| `none` | 응답 시작 전 오류 (429·529·5xx·401·400, 연결 실패) → 과금 없음으로 기록 | 요청 단계 오류는 생성 전이므로 |
+| `partial_lower_bound` | 응답 도중 끊김(SSE 오류·타임아웃 중단) → **그때까지 받은 사용량을 하한으로 기록** | 스트림 `message_start`·`message_delta` 의 누적 usage |
+| `unknown` | 응답 시작 여부·사용량을 알 수 없음 (함수 중단 등) | |
+| `full` | 성공 | |
+
+> 공식 문서는 **스트리밍 중 클라이언트가 끊은 요청의 과금 방식**을 명시하지 않습니다. 실제 키로 일부러 타임아웃을 낸 뒤 Console Usage 에서 확인하는 것을 권장합니다.
+
+### 타임아웃 이후 비용과 재시도 정책
+- 서버는 240초에 Claude 호출을 중단합니다. 이때까지 처리된 토큰은 과금될 수 있으며, **크레딧은 사용자에게 복구**되므로 비용은 서비스가 부담합니다 (`opsDaily.aiCostUsdFailed` 로 추적).
+- SDK 자동 재시도(`maxRetries: 1`)는 **응답이 시작되기 전** 오류(429·5xx·연결)에만 동작 → 이중 과금 없음. 응답 도중 끊긴 요청은 재시도하지 않습니다.
+- 사용자의 "다시 시도"는 **새 요청**(새 1크레딧 예약)입니다. 결과를 모르는 상태(네트워크 끊김)에서는 같은 요청 ID 로만 재확인하므로 중복 차감·중복 AI 호출이 없습니다.
+- 반복 실패로 비용이 새는 것을 막는 장치: 사용자별 일일 20회(실패 포함)·분당 3회, 서비스 전체 일일 비용 상한(`DAILY_COST_LIMIT_USD`, 기본 $30), `config/service.generationEnabled=false` 즉시 중지.
 
 ## 측정 방법
-1. **단발 측정 (권장, 키 필요)**
-   ```bash
-   ANTHROPIC_API_KEY=sk-ant-... npm run test:live
-   ```
-   사진 1장 + 짧은 분량으로 실제 호출 1회 → 토큰·웹검색 횟수·`estimatedCostUsd`·소요시간 출력.
-   모델 비교: `CLAUDE_MODEL=claude-sonnet-5-5 ANTHROPIC_API_KEY=... npm run test:live`
-2. **운영 데이터** (관리자): Firestore 콘솔에서 `generations` 를 `status == succeeded` 로 조회해 `costUsd` 평균, 또는 BigQuery 내보내기 후 집계
-3. **실제 청구액 대조**: Anthropic Console → Usage / Cost (API 키별) 와 `costUsd` 합계를 주 1회 비교 (캐시·할인·환율 차이 확인)
+1. **과금 없는 확인**: `npm run test:live:check` (키·모델·웹 검색 지원)
+2. **입력 토큰 사전 측정 (무료)**: `npm run benchmark -- --count-only` — 사진 0/3/5/10장 × 분량별 입력 토큰 (검색 결과 제외)
+3. **실제 측정**: `npm run benchmark -- --yes --photos-dir ./samples` — 12회 실행, 약 $1.5~3. 모델 비교 `--models claude-sonnet-4-6,claude-sonnet-5-5`
+4. **운영 데이터**: `npm run cost-report -- --project <id> --from <날짜> --to <날짜> --usd-krw <환율> --pg-fee <수수료율>`
+5. **실제 청구액 대조**: Anthropic Console → Usage/Cost 와 `opsDaily.aiCostUsd + aiCostUsdFailed` 합계를 주 1회 비교
 
-## 비용 통제 장치 (구현됨)
-- 1크레딧 = 1회, 크레딧 없으면 호출 자체를 하지 않음
-- 사용자별 분당 3회 · 일일 20회 · 동시 2건 (`functions/.env`)
-- `WEB_SEARCH_MAX_USES=5`, `CLAUDE_MAX_TOKENS=8192`, 호출 시간 240초
-- 함수 `maxInstances: 10`
-- 권장: Anthropic Console 에서 **월 지출 한도(spend limit)** 설정, Google Cloud 예산 알림
+## 크레딧 상품 손익 분석 (10 / 30 / 70회)
+`cost-report` 가 계산하는 것 (가격은 입력하지 않으면 계산만 함):
+- 생성 1회 원가 = AI 평균 비용 + 실패 호출 부담(성공 1건당) + Functions 실행 비용 + 사진 저장(평균 용량 × 보관 개월)
+- 보수적 원가 = p95 AI 비용 기준
+- 상품별 원가, **손익분기 가격**, **목표 마진 가격**(기본 50%), 가격 후보를 넣으면 순매출(부가세 10%·PG 수수료 차감)·마진·p95 기준 마진
+- 가입자 1명당 무료 2회 원가 (마케팅 비용으로 별도 관리)
+
+PG 수수료율은 토스페이먼츠 계약 조건에 따라 다르므로 직접 입력하세요 (미입력 시 0% 로 계산하고 경고 표시).

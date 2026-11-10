@@ -15,6 +15,7 @@ const P = {
   DAILY_GENERATION_LIMIT: defineInt('DAILY_GENERATION_LIMIT', { default: 20 }),
   MAX_CONCURRENT_GENERATIONS: defineInt('MAX_CONCURRENT_GENERATIONS', { default: 2 }),
   STORAGE_QUOTA_MB: defineInt('STORAGE_QUOTA_MB', { default: 200 }),
+  DAILY_COST_LIMIT_USD: defineInt('DAILY_COST_LIMIT_USD', { default: 30, description: '하루 AI 예상 비용 합계 상한 (USD). 0 이면 끔. config/service.dailyCostLimitUsd 가 있으면 그 값 우선' }),
 };
 
 /** 함수 실행 시점에 호출 (배포 분석 단계에서는 .value() 를 부르지 않는다) */
@@ -29,6 +30,7 @@ function runtimeConfig() {
     dailyLimit: P.DAILY_GENERATION_LIMIT.value(),
     maxConcurrent: P.MAX_CONCURRENT_GENERATIONS.value(),
     storageQuotaBytes: P.STORAGE_QUOTA_MB.value() * 1024 * 1024,
+    dailyCostLimitUsd: P.DAILY_COST_LIMIT_USD.value(),
     leaseSeconds: 360, // generatePost timeoutSeconds(300) 보다 길어야 한다
   };
 }

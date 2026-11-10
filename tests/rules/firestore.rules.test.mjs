@@ -164,3 +164,24 @@ test('posts: 스키마 위반 거부 (타인 uid, uid 변경, 임의 필드, cre
   // 로컬 저장 글 이전(legacy) 형식 허용
   await assertSucceeds(setDoc(doc(db, 'posts/legacy_alice_1700000000000'), { ...base, legacyId: 1700000000000, legacySavedAt: '2024. 1. 1. 오후 3:00:00' }));
 });
+
+test('운영 컬렉션(비용·삭제작업·탈퇴기록·설정): 일반 사용자 읽기/쓰기 불가, 관리자 읽기만 (config/service 는 관리자 쓰기)', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'generationMetrics/alice_req1'), { uid: 'alice', costUsd: 0.1 });
+    await setDoc(doc(db, 'opsDaily/2026-11-10'), { aiCostUsd: 1 });
+    await setDoc(doc(db, 'photoDeletionJobs/gen_x'), { uid: 'alice', status: 'failed' });
+    await setDoc(doc(db, 'accountDeletions/bob'), { status: 'done' });
+    await setDoc(doc(db, 'config/service'), { generationEnabled: true });
+  });
+  for (const p of ['generationMetrics/alice_req1', 'opsDaily/2026-11-10', 'photoDeletionJobs/gen_x', 'accountDeletions/bob', 'config/service']) {
+    await assertFails(getDoc(doc(alice(), p)));
+    await assertFails(setDoc(doc(alice(), p), { x: 1 }));
+    await assertSucceeds(getDoc(doc(admin(), p)));
+  }
+  await assertFails(setDoc(doc(admin(), 'generationMetrics/alice_req1'), { costUsd: 0 }));
+  await assertFails(setDoc(doc(admin(), 'photoDeletionJobs/gen_x'), { status: 'done' }));
+  await assertSucceeds(setDoc(doc(admin(), 'config/service'), { generationEnabled: false, pauseMessage: '점검 중', dailyCostLimitUsd: 20 }));
+  await assertFails(setDoc(doc(admin(), 'config/service'), { generationEnabled: 'no' }));
+  await assertFails(setDoc(doc(admin(), 'config/other'), { generationEnabled: false }));
+});

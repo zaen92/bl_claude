@@ -36,3 +36,22 @@ test('git 에 추적되는 파일에 실제 비밀값 형태가 없다', () => {
   }
   assert.ok(!tracked.includes('functions/.secret.local'), '.secret.local 은 커밋 금지');
 });
+
+test('Functions 로그에 입력 내용·이메일·키·토큰이 들어가지 않는다 (logger 호출 정적 검사)', () => {
+  const files = [join(ROOT, 'functions/index.js'), ...walk(join(ROOT, 'functions/src'))].filter((f) => f.endsWith('.js'));
+  const banned = /\b(input|content|prompt|memo|title|email|apiKey|key|secret|token|idToken|text|body|result|images?|naver)\b\s*[,}:]/;
+  for (const f of files) {
+    const src = readFileSync(f, 'utf8');
+    assert.ok(!/console\.(log|info|warn|error)\(/.test(src), `${f}: console.* 대신 logger 사용`);
+    for (const m of src.matchAll(/logger(?:\s*&&\s*logger)?\.(info|warn|error|debug)\(([^;]*?)\);/gs)) {
+      const argsText = m[2].replace(/'[^']*'/g, "''"); // 메시지 문자열 제외, 필드 이름만 검사
+      assert.ok(!banned.test(argsText), `${f}: 로그 필드에 민감 정보 가능성 → ${m[0].slice(0, 120)}`);
+    }
+  }
+});
+
+test('Storage 다운로드 토큰을 만들지 않고, 웹은 getDownloadURL 을 쓰지 않는다', () => {
+  const fn = readFileSync(join(ROOT, 'functions/src/storage/photos.js'), 'utf8');
+  assert.ok(!/firebaseStorageDownloadTokens\s*:/.test(fn));
+  for (const f of walk(join(ROOT, 'web/src'))) assert.ok(!/getDownloadURL\s*\(/.test(readFileSync(f, 'utf8')), f);
+});

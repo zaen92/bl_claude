@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('비로그인: 모든 callable 이 unauthenticated', async () => {
-  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits']) {
+  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits', 'deleteAccount', 'adminCheckAiConfig', 'adminRetryDeletionJob']) {
     const r = await call(name, {});
     assert.equal(r.status, 401, name);
     assert.equal(r.body.error.status, 'UNAUTHENTICATED', name);
@@ -150,4 +150,44 @@ test('adminAdjustCredits: admin claim 사용자는 조정 가능 + 원장 기록
   const again = await call('adminAdjustCredits', { uid: target.uid, delta: 3, reason: 'CS 보상', requestId: 'req_cs000001' }, adminToken);
   assert.equal(again.body.result.duplicate, true);
   assert.equal(again.body.result.balanceAfter, 5);
+});
+
+async function adminToken(email) {
+  const adm = await signUp(email);
+  await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/projects/${PROJECT}/accounts:update`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer owner' },
+    body: JSON.stringify({ localId: adm.uid, customAttributes: JSON.stringify({ admin: true }) }),
+  });
+  const r = await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'pw123456', returnSecureToken: true }),
+  });
+  return (await r.json()).idToken;
+}
+
+test('adminCheckAiConfig: 관리자만, 키 값은 응답에 없음 (에뮬레이터 mock)', async () => {
+  const u = await signUp('plain@x.com');
+  assert.equal((await call('adminCheckAiConfig', {}, u.idToken)).body.error.status, 'PERMISSION_DENIED');
+  const t = await adminToken('boss2@x.com');
+  const r = await call('adminCheckAiConfig', {}, t);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const c = r.body.result;
+  assert.deepEqual([c.provider, c.model, c.webSearchToolType, c.modelAvailable, c.webSearchSupported], ['mock', 'claude-sonnet-4-6', 'web_search_20260209', true, true]);
+  assert.ok(!JSON.stringify(c).match(/sk-ant|secret/i));
+});
+
+test('deleteAccount: 확인 문구 필요 → 데이터·Auth 계정 삭제, 다시 로그인 불가', async () => {
+  const u = await signUp('bye@x.com');
+  await verifyEmail(u.uid);
+  await call('ensureUserProfile', {}, u.idToken);
+  await call('generatePost', GOOD('req_bye_00001'), u.idToken);
+  assert.equal((await call('deleteAccount', { confirm: '아니요' }, u.idToken)).body.error.status, 'INVALID_ARGUMENT');
+  const r = await call('deleteAccount', { confirm: '탈퇴' }, u.idToken);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.result.deleted, true);
+  const login = await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'bye@x.com', password: 'pw123456', returnSecureToken: true }),
+  });
+  assert.equal(login.status, 400);
+  const st = await fetch(`http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST || '127.0.0.1:9199'}/v0/b/demo-jaeinit.appspot.com/o?prefix=${encodeURIComponent(`users/${u.uid}/`)}`, { headers: { Authorization: 'Bearer owner' } });
+  assert.equal(((await st.json()).items || []).length, 0);
 });

@@ -35,6 +35,7 @@ function openAccount() {
   if (A.needsVerification(u)) { g('verifyEmail').textContent = u.email; msg('verifyErr', ''); msg('verifyOk', ''); return showView('viewVerify'); }
   renderAccount();
   if (!packagesLoaded) loadPackages();
+  A.isAdmin().then((a) => { g('adminCheckBtn').style.display = a ? '' : 'none'; });
   showView('viewAccount');
 }
 
@@ -88,6 +89,41 @@ async function checkVerified() {
 async function logout() {
   await A.logoutUser();
   closeModal();
+}
+
+/* ── 관리자: AI 설정 점검 ── */
+async function adminCheck() {
+  msg('acctOk', '점검 중...');
+  try {
+    const c = await api.adminCheckAiConfig();
+    const ok = (v) => (v === true ? '✅' : v === false ? '❌' : '–');
+    msg('acctOk', `${c.provider === 'mock' ? '🧪 mock(에뮬레이터)' : 'Anthropic'} · 키 ${ok(c.keyConfigured)} 형식 ${ok(c.keyFormatOk)} · 모델 ${c.model} ${ok(c.modelAvailable)} · 웹검색 ${c.webSearchToolType} ${ok(c.webSearchSupported)} · 네이버 ${ok(c.naverConfigured)} · App Check 강제 ${ok(c.appCheckEnforced)}${c.error ? ' · 오류 ' + (c.error.status || '') + ' ' + c.error.type : ''}`, c.modelAvailable === false || c.keyConfigured === false);
+  } catch (e) {
+    msg('acctOk', '⚠️ ' + api.apiErrorMessage(e), true);
+  }
+}
+
+/* ── 회원 탈퇴 ── */
+async function withdraw() {
+  const typed = prompt('탈퇴하면 저장된 글, 생성 이력, 사진이 모두 삭제되고 남은 크레딧도 사라져요.\n계속하려면 "탈퇴" 라고 입력해주세요.');
+  if (typed === null) return;
+  if (typed.trim() !== '탈퇴') { msg('acctOk', '⚠️ 확인 문구가 일치하지 않아 취소했어요.', true); return; }
+  try {
+    msg('acctOk', '탈퇴 처리 중이에요...');
+    await api.deleteAccount();
+    try { localStorage.removeItem('jaeinit_pending_generation_' + state.user.uid); } catch (e) { /* ignore */ }
+    await A.logoutUser().catch(() => {});
+    closeModal();
+    alert('탈퇴가 완료됐어요. 그동안 이용해주셔서 감사합니다.');
+  } catch (e) {
+    if (e.details && e.details.reason === 'requires_recent_login') {
+      msg('acctOk', '🔐 보안을 위해 다시 로그인한 뒤 탈퇴를 진행해주세요.', true);
+      await A.logoutUser().catch(() => {});
+      setTimeout(() => openAccount(), 600);
+    } else {
+      msg('acctOk', '⚠️ ' + api.apiErrorMessage(e), true);
+    }
+  }
 }
 
 /* ── 계정 화면 ── */
@@ -212,7 +248,7 @@ async function showGeneration(gen, { localPhotos } = {}) {
     const meta = state.resultMeta;
     const urls = await G.photoUrls(meta.photos);
     if (state.resultMeta !== meta) return;
-    state.previewPhotos = urls.filter(Boolean);
+    state.previewPhotos = urls; // 삭제된 사진은 null → 미리보기에서 빈 칸 표시
     if (g('rightPreview').style.display !== 'none') renderPreview();
     g('tabPreview').style.color = '#2d6a4f';
   }
@@ -497,7 +533,7 @@ function renderSavedList() {
 /* ── HTML onclick 에서 쓰는 함수 노출 (기존 마크업 유지) ── */
 Object.assign(window, {
   st, sv, gen, reset, savePost, switchTab, addImg, cpId, cpTags, cpAll,
-  openAccount, closeModal, loginGoogle, loginEmail, signupEmail, resetPw, resendVerify, checkVerified, logout, saveName,
+  openAccount, closeModal, loginGoogle, loginEmail, signupEmail, resetPw, resendVerify, checkVerified, logout, saveName, withdraw, adminCheck,
 });
 
 renderSavedList();

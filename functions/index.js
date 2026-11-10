@@ -7,6 +7,10 @@
  *   generatePost          실제 Claude 생성 + 1크레딧 차감/복구 (스트리밍)              (STEP 2)
  *   getGenerationStatus   생성 상태 조회 (새로고침·네트워크 끊김 후 복구)               (STEP 2)
  *   sweepStaleGenerations 5분마다 멈춘 생성 건 크레딧 복구                             (STEP 2)
+ *   photoRetentionDaily   매일 04:10 KST 보관 기간(90일) 지난 미저장 생성 사진 삭제 작업 등록 (STEP 2.5)
+ *   processPhotoDeletionJobs 10분마다 사진 삭제 작업 실행·재시도                       (STEP 2.5)
+ *   deleteAccount / onAuthUserDeleted  회원 탈퇴 시 사진·글·생성 기록 삭제             (STEP 2.5)
+ *   adminCheckAiConfig / adminRetryDeletionJob  관리자 점검 도구                       (STEP 2.5)
  *   createOrder / confirmPayment  인터페이스만 (STEP 3, 토스페이먼츠)
  */
 const { onCall, HttpsError } = require('firebase-functions/https');
@@ -25,6 +29,11 @@ const { runtimeConfig } = require('./src/config/params');
 const { ANTHROPIC_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, secretValue } = require('./src/config/secrets');
 const service = require('./src/generation/service');
 const { findPlace } = require('./src/naver');
+const retention = require('./src/storage/retention');
+const deletionJobs = require('./src/storage/deletionJobs');
+const { deleteAccountData } = require('./src/account/deleteAccount');
+const { webSearchToolType } = require('./src/ai/claude');
+const functionsV1 = require('firebase-functions/v1');
 
 initializeApp();
 setGlobalOptions({ region: REGION, maxInstances: 10 });
@@ -161,6 +170,90 @@ exports.getGenerationStatus = onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, asy
 exports.sweepStaleGenerations = onSchedule({ schedule: 'every 5 minutes', timeZone: 'Asia/Seoul' }, async () => {
   const n = await service.sweepStale(getFirestore(), getStorage().bucket(), Date.now());
   if (n) logger.warn('stale generations refunded', { count: n });
+});
+
+exports.photoRetentionDaily = onSchedule({ schedule: '10 4 * * *', timeZone: 'Asia/Seoul', timeoutSeconds: 540 }, async () => {
+  const r = await retention.scanExpired(getFirestore(), Date.now());
+  logger.info('photo retention scan', r);
+});
+
+exports.processPhotoDeletionJobs = onSchedule({ schedule: 'every 10 minutes', timeZone: 'Asia/Seoul', timeoutSeconds: 540 }, async () => {
+  const r = await deletionJobs.processJobs(getFirestore(), getStorage().bucket(), Date.now());
+  if (r.failed) logger.error('photo deletion jobs failed (관리자 확인 필요: photoDeletionJobs status==failed)', r);
+  else if (r.done || r.retry) logger.info('photo deletion jobs', r);
+});
+
+/**
+ * 회원 탈퇴: 최근 로그인(10분 이내) 확인 → 데이터 정리 → Auth 계정 삭제.
+ * 요청 { confirm: '탈퇴' }
+ */
+exports.deleteAccount = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, timeoutSeconds: 300 }, async (request) => {
+  const auth = requireAuth(request);
+  if (!request.data || request.data.confirm !== '탈퇴') throw new HttpsError('invalid-argument', '확인 문구가 일치하지 않아요.');
+  const authTime = Number(auth.token.auth_time || 0) * 1000;
+  if (!authTime || Date.now() - authTime > 10 * 60 * 1000) {
+    throw new HttpsError('failed-precondition', '보안을 위해 다시 로그인한 뒤 탈퇴를 진행해주세요.', { reason: 'requires_recent_login' });
+  }
+  try {
+    const r = await deleteAccountData(getFirestore(), getStorage().bucket(), auth.uid, { source: 'user_request' });
+    await getAuth().deleteUser(auth.uid);
+    logger.info('account deleted', { storage: r.storage, posts: r.posts, generations: r.generations });
+    return { deleted: true, storage: r.storage };
+  } catch (err) {
+    throw toHttpsError(err);
+  }
+});
+
+/** 관리자가 콘솔에서 계정을 지운 경우 등에도 데이터 정리 (멱등) */
+exports.onAuthUserDeleted = functionsV1.region(REGION).auth.user().onDelete(async (user) => {
+  const r = await deleteAccountData(getFirestore(), getStorage().bucket(), user.uid, { source: 'auth_trigger' });
+  logger.info('account data cleaned by trigger', { storage: r.storage, posts: r.posts, generations: r.generations });
+});
+
+/** 관리자: AI 설정 점검 (키 존재·형식, 모델 사용 가능 여부, 웹 검색 지원) — 키 값은 반환하지 않음, 생성 비용 없음 */
+exports.adminCheckAiConfig = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, secrets: [ANTHROPIC_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET] }, async (request) => {
+  requireAdmin(request);
+  const cfg = runtimeConfig();
+  const key = secretValue(ANTHROPIC_API_KEY);
+  const out = {
+    provider: USE_MOCK_AI ? 'mock' : 'anthropic',
+    keyConfigured: USE_MOCK_AI ? null : !!key,
+    keyFormatOk: USE_MOCK_AI ? null : !!(key && key.startsWith('sk-ant-')),
+    model: cfg.model,
+    webSearchToolType: webSearchToolType(cfg.model, cfg.webSearchToolType),
+    webSearchMaxUses: cfg.webSearchMaxUses,
+    naverConfigured: !!naverDeps(),
+    appCheckEnforced: ENFORCE_APP_CHECK,
+    modelAvailable: null,
+    webSearchSupported: null,
+    error: null,
+  };
+  const ai = aiDeps();
+  if (ai) {
+    try {
+      const m = await ai.client.models.retrieve(cfg.model);
+      out.modelAvailable = m.id === cfg.model || !!m.id;
+      out.maxInputTokens = m.max_input_tokens || null;
+      out.maxOutputTokens = m.max_tokens || null;
+      const st = m.capabilities && m.capabilities.server_tools;
+      out.webSearchSupported = st && st.web_search ? !!st.web_search.supported : null;
+    } catch (err) {
+      out.modelAvailable = false;
+      out.error = { status: err.status || null, type: err.type || (err.error && err.error.type) || err.name || 'error' };
+    }
+  }
+  return out;
+});
+
+/** 관리자: 실패한 사진 삭제 작업 재시도 */
+exports.adminRetryDeletionJob = onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, async (request) => {
+  requireAdmin(request);
+  const id = request.data && request.data.jobId;
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{3,200}$/.test(id)) throw new HttpsError('invalid-argument', 'jobId 가 필요해요.');
+  const ok = await deletionJobs.resetJob(getFirestore(), id, Date.now());
+  if (!ok) throw new HttpsError('not-found', '작업을 찾을 수 없어요.');
+  const r = await deletionJobs.runJob(getFirestore(), getStorage().bucket(), id, Date.now());
+  return { result: r };
 });
 
 /** @returns {Promise<import('./src/api/contracts').CreateOrderResponse>} STEP 3 */

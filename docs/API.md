@@ -12,6 +12,11 @@
 | `generatePost` | ✅ **STEP 2 — 실제 Claude 호출 + 크레딧 차감/복구** | 로그인 + 이메일 인증 |
 | `getGenerationStatus` | ✅ STEP 2 | 로그인 (본인 기록만) |
 | `sweepStaleGenerations` | ✅ STEP 2 (5분 주기 스케줄) | 시스템 |
+| `photoRetentionDaily` · `processPhotoDeletionJobs` | ✅ STEP 2.5 (매일 04:10 / 10분 주기) | 시스템 |
+| `deleteAccount` | ✅ STEP 2.5 회원 탈퇴 | 로그인 + 최근 10분 내 로그인 |
+| `onAuthUserDeleted` | ✅ STEP 2.5 (Auth 삭제 트리거, 데이터 정리) | 시스템 |
+| `adminCheckAiConfig` | ✅ STEP 2.5 키·모델·웹검색 점검 (생성 비용 없음, 키 값 미반환) | admin |
+| `adminRetryDeletionJob` | ✅ STEP 2.5 실패한 사진 삭제 작업 재시도 | admin |
 | `createOrder` / `confirmPayment` / `tossWebhook` | ⬜ STEP 3 (인터페이스만) | |
 
 ---
@@ -30,13 +35,13 @@
 | clientRequestId | `[A-Za-z0-9_-]{8,64}` — 멱등 키 |
 
 ### 처리 순서 (`functions/src/generation/service.js`)
-1. 인증 + 이메일 인증 확인 (토큰 → 필요 시 Admin Auth 재확인), 입력 검증, API 키 설정 확인(없으면 **차감 전** 거부)
+1. 인증 + 이메일 인증 확인 (토큰 → 필요 시 Admin Auth 재확인), 입력 검증, API 키 설정 확인(없으면 **차감 전** 거부), 서비스 게이트(일시중지·일일 비용 상한, 차감 전)
 2. **예약 트랜잭션**: `generations/{uid}_{clientRequestId}` 가 있으면 그 상태를 반환(중복 실행·차감 없음). 없으면
    잔액 ≥1 · 동시 실행 < 상한 · 분당/일일 한도 · 저장 용량 확인 → `credits −1`(무료 우선), `creditLedger/gen_{id}`, `generations`(processing, lease 6분) 생성
 3. 사진 → Storage 저장 · 네이버 지역검색(키 설정 시) · Claude 호출(스트리밍, 웹 검색 도구, `pause_turn` 이어쓰기, 240초 제한)
 4. 결과 파싱(기존 JSON 추출 + recover) → 본문이 비면 실패 처리
-5. **확정 트랜잭션**: `succeeded`, `charge.status=captured`, 토큰 사용량·예상 비용·지연시간 기록
-6. **실패 시 복구 트랜잭션**: `creditLedger/refund_{id}` +1 (차감했던 버킷으로), `failed`, 사진 삭제·용량 반환
+5. **확정 트랜잭션**: `succeeded`, `charge.status=captured`, 사진 보관 만료일(90일), `generationMetrics`·`opsDaily` 에 토큰·비용·품질 기록
+6. **실패 시 복구 트랜잭션** (status==processing 일 때만 → 이중 환급 불가): `creditLedger/refund_{id}` +1 (차감했던 버킷으로), `failed`, 부분 사용량 기록 → 사진 삭제(실패 시 삭제 작업 등록)·용량 반환
 7. 함수가 3~6 전에 죽으면: lease 만료 후 `getGenerationStatus` 조회 시 또는 5분 주기 스케줄러가 6 을 실행
 
 스트리밍 청크: `{type:'status', message}` | `{type:'text', delta}` → 기존 "실시간 작성 중" 박스
@@ -58,6 +63,8 @@
 | too_many_concurrent | resource-exhausted | 차감 안 함 | 생성 중인 글 있음 |
 | storage_quota | resource-exhausted | 차감 안 함 | 사진 저장 공간 부족 |
 | ai_not_configured | failed-precondition | 차감 안 함 | 관리자 문의 |
+| service_paused | unavailable | 차감 안 함 | `config/service.pauseMessage` |
+| daily_budget_exceeded | unavailable | 차감 안 함 | 오늘 이용량 많음 |
 | ai_timeout · ai_network · ai_rate_limited · ai_unavailable · internal | unavailable | **복구됨** | 재시도 가능 |
 | ai_config · ai_billing · ai_bad_request · ai_refusal | failed-precondition | **복구됨** | 재시도 불가/입력 수정 |
 | ai_empty_result · ai_incomplete · storage_failed | unavailable | **복구됨** | 재시도 가능 |
@@ -88,9 +95,16 @@
 | DAILY_GENERATION_LIMIT | 20 | 사용자별 일일(KST) 생성 요청 (실패 포함) |
 | MAX_CONCURRENT_GENERATIONS | 2 | 사용자별 동시 생성 |
 | STORAGE_QUOTA_MB | 200 | 사용자별 사진 보관 용량 |
+| DAILY_COST_LIMIT_USD | 30 | 서비스 전체 하루 AI 예상 비용 상한 (0=끔). `config/service.dailyCostLimitUsd` 가 있으면 우선 |
 | ENFORCE_APP_CHECK | false | 운영 배포 전 true |
 
-`functions/.env.demo-jaeinit` (에뮬레이터 전용): `AI_MOCK=true` → 실제 API 대신 mock. 운영에서는 무시됨(`FUNCTIONS_EMULATOR` 확인).
+`functions/.env.demo-jaeinit` (에뮬레이터 전용): `AI_MOCK=true` → 실제 API 대신 mock. 운영에서는 무시됨(`FUNCTIONS_EMULATOR` 확인). `functions/.env.local`(gitignore)에 `AI_MOCK=false` 를 두면 에뮬레이터에서 실제 API 사용 (확인됨).
+
+## 런타임 운영 스위치 — `config/service` (관리자, Firestore 콘솔에서 수정)
+```json
+{ "generationEnabled": false, "pauseMessage": "서비스 점검 중이에요 (14시 재개)", "dailyCostLimitUsd": 50 }
+```
+30초 이내 반영(인스턴스 캐시). 재배포 불필요.
 
 ## 비밀값 (Secret Manager)
 ```bash

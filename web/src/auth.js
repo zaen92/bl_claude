@@ -47,3 +47,9 @@ const MSG = {
   'auth/account-exists-with-different-credential': '같은 이메일로 다른 로그인 방식이 이미 있어요.',
 };
 export const authErrorMessage = (e) => MSG[e && e.code] || (e && e.message) || '오류가 발생했어요.';
+
+/** 관리자 여부 (custom claim admin) — 화면 표시용. 실제 권한은 서버·보안 규칙이 판단 */
+export async function isAdmin() {
+  if (!auth.currentUser) return false;
+  try { return (await auth.currentUser.getIdTokenResult()).claims.admin === true; } catch (e) { return false; }
+}

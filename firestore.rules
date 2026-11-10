@@ -84,6 +84,24 @@ service cloud.firestore {
       allow delete: if ownsExisting();
     }
 
+    // ── 운영 데이터 (서버 전용 쓰기, 관리자만 읽기) ──────────────
+    // generationMetrics: 생성별 토큰·비용·품질 / opsDaily: 일별 합계
+    // photoDeletionJobs: 사진 삭제 작업 / accountDeletions: 탈퇴 처리 기록
+    match /generationMetrics/{id} { allow read: if isAdmin(); allow write: if false; }
+    match /opsDaily/{day} { allow read: if isAdmin(); allow write: if false; }
+    match /photoDeletionJobs/{id} { allow read: if isAdmin(); allow write: if false; }
+    match /accountDeletions/{uid} { allow read: if isAdmin(); allow write: if false; }
+
+    // ── config/service : 생성 일시중지·일일 비용 상한 (관리자만) ──
+    match /config/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin() && docId == 'service'
+        && request.resource.data.keys().hasOnly(['generationEnabled', 'pauseMessage', 'dailyCostLimitUsd', 'updatedAt', 'updatedBy'])
+        && (!('generationEnabled' in request.resource.data) || request.resource.data.generationEnabled is bool)
+        && (!('pauseMessage' in request.resource.data) || request.resource.data.pauseMessage is string && request.resource.data.pauseMessage.size() <= 200)
+        && (!('dailyCostLimitUsd' in request.resource.data) || request.resource.data.dailyCostLimitUsd is number && request.resource.data.dailyCostLimitUsd >= 0);
+    }
+
     // ── signupGrants/{emailHash} : 가입 보너스 이력 (서버 전용, 비공개) ──
     match /signupGrants/{key} {
       allow read, write: if false;

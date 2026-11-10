@@ -33,6 +33,16 @@ export async function getGenerationStatus(generationId) {
   return (await fn('getGenerationStatus')({ generationId })).data;
 }
 
+/** 관리자: AI 설정 점검 (키 값은 반환되지 않음, 생성 비용 없음) */
+export async function adminCheckAiConfig() {
+  return (await fn('adminCheckAiConfig')()).data;
+}
+
+/** 회원 탈퇴 (서버가 사진·글·생성 기록 삭제 후 계정 삭제) */
+export async function deleteAccount() {
+  return (await fn('deleteAccount', 300_000)({ confirm: '탈퇴' })).data;
+}
+
 const FN_ERR = {
   'functions/unauthenticated': '로그인이 필요해요.',
   'functions/permission-denied': '권한이 없어요.',

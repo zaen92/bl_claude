@@ -26,7 +26,7 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   const bodies = [];
   p.on('pageerror', (e) => errs.push('pageerror ' + e.message));
   p.on('console', (m) => { if (m.type() === 'error' && !/net::ERR_INTERNET_DISCONNECTED|Failed to fetch|ERR_NETWORK|Could not reach Cloud Firestore|WebChannelConnection/.test(m.text())) errs.push('console ' + m.text()); });
-  p.on('dialog', async (d) => { await d.accept(); });
+  p.on('dialog', async (d) => { await d.accept(d.type() === 'prompt' ? '탈퇴' : undefined); });
   p.on('request', (r) => { const pd = r.postData(); if (pd) bodies.push(pd); });
   const credits = async () => p.textContent('#stxStatus');
   const historyCount = () => p.locator('#historyList > div').count();
@@ -165,11 +165,11 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
     console.log('DEBUG', (await p.innerHTML('#previewArea')).slice(0, 600), errs); throw e;
   });
   const srcs = await p.$$eval('.pp-img img', (els) => els.map((e) => e.src));
-  assert.ok(srcs.every((s) => s.includes('/v0/b/demo-jaeinit.appspot.com/o/users%2F' + userUid)), srcs[0]);
+  assert.ok(srcs.every((s) => s.startsWith('blob:')), '토큰 URL 이 아닌 인증된 getBlob 사용: ' + srcs[0]);
   const loaded = await p.$$eval('.pp-img img', (els) => els.every((e) => e.complete && e.naturalWidth > 0));
   assert.ok(loaded, '이미지 로드');
   await p.screenshot({ path: OUT + '/4-saved-reload-photos.png' });
-  log('새로고침 후 저장 글 불러오기 → Storage 사진 3장 표시');
+  log('새로고침 후 저장 글 불러오기 → Storage 사진 3장 표시 (getBlob, 다운로드 토큰 URL 없음)');
 
   // ── 생성 이력 ──
   await p.click('#tabHistory');
@@ -190,6 +190,20 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   const html = await p.content();
   assert.ok(!/sk-ant-|api\.anthropic\.com|openapi\.naver\.com/.test(html));
   log('브라우저 요청·페이지에 API 키/외부 AI 엔드포인트 없음');
+
+  assert.ok(!bodies.concat(await p.evaluate(() => performance.getEntriesByType('resource').map((e) => e.name))).some((u) => /[?&]token=/.test(u)), '다운로드 토큰 URL 미사용');
+  log('Storage 다운로드 토큰 URL 요청 없음');
+
+  // ── 회원 탈퇴 ──
+  await p.click('#stx');
+  await p.click('#viewAccount >> text=회원 탈퇴');
+  await p.waitForFunction(() => document.getElementById('stxStatus').textContent === '로그인 필요', null, { timeout: 30000 });
+  const relogin = await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'pw123456', returnSecureToken: true }) });
+  assert.equal(relogin.status, 400);
+  assert.equal((await db.collection('posts').where('uid', '==', userUid).get()).size, 0);
+  const left = await (await fetch(`http://127.0.0.1:9199/v0/b/demo-jaeinit.appspot.com/o?prefix=${encodeURIComponent('users/' + userUid + '/')}`, { headers: { Authorization: 'Bearer owner' } })).json();
+  assert.equal((left.items || []).length, 0);
+  log('회원 탈퇴 → 계정·글·사진 삭제, 재로그인 불가');
 
   assert.deepEqual(errs, []);
   log('콘솔 오류 없음');

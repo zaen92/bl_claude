@@ -66,28 +66,47 @@ async function runClaude(client, params, { onText, signal, maxContinuations = 3 
   let text = '';
   let messages = params.messages;
   const assistantSoFar = [];
+  const blockTypes = {};
   let last = null;
   let requestCount = 0;
+  let responseStarted = false; // 모델이 응답을 시작함(= 과금이 시작됐을 수 있음)
   for (let i = 0; i <= maxContinuations; i++) {
     requestCount++;
-    const stream = client.messages.stream({ ...params, messages }, { signal });
-    for await (const ev of stream) {
-      if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
-        text += ev.delta.text;
-        if (onText) onText(ev.delta.text);
+    // 진행 중인 요청의 부분 사용량 (중단 시 비용 하한 추정용). message_delta.usage 는 누적값.
+    let partial = null;
+    try {
+      const stream = client.messages.stream({ ...params, messages }, { signal });
+      for await (const ev of stream) {
+        if (ev.type === 'message_start' && ev.message && ev.message.usage) {
+          responseStarted = true;
+          partial = { ...ev.message.usage };
+        } else if (ev.type === 'message_delta' && ev.usage) {
+          partial = { ...(partial || {}), ...ev.usage };
+        } else if (ev.type === 'content_block_start' && ev.content_block) {
+          blockTypes[ev.content_block.type] = (blockTypes[ev.content_block.type] || 0) + 1;
+        } else if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
+          responseStarted = true;
+          text += ev.delta.text;
+          if (onText) onText(ev.delta.text);
+        }
       }
+      last = await stream.finalMessage();
+    } catch (err) {
+      if (partial) addUsage(usage, partial);
+      err.aiMeta = { usage, responseStarted, requestCount, partialUsage: !!partial };
+      throw err;
     }
-    last = await stream.finalMessage();
     addUsage(usage, last.usage);
+    for (const b of last.content || []) blockTypes[b.type] = blockTypes[b.type] || 1;
     if (last.stop_reason !== 'pause_turn') break;
     // 서버 도구 반복 한도 → 지금까지의 assistant 내용을 붙여 그대로 재요청 (추가 user 메시지 없이)
     assistantSoFar.push(...last.content);
     messages = [params.messages[0], { role: 'assistant', content: assistantSoFar.slice() }];
   }
   const stopReason = last ? last.stop_reason : 'unknown';
-  if (stopReason === 'refusal') throw new AiError('ai_refusal', 'model refused', { usage });
-  if (stopReason === 'pause_turn') throw new AiError('ai_incomplete', 'too many continuations', { usage });
-  return { text, usage, stopReason, model: (last && last.model) || params.model, requestCount };
+  if (stopReason === 'refusal') throw new AiError('ai_refusal', 'model refused', { usage, responseStarted: true });
+  if (stopReason === 'pause_turn') throw new AiError('ai_incomplete', 'too many continuations', { usage, responseStarted: true });
+  return { text, usage, stopReason, model: (last && last.model) || params.model, requestCount, blockTypes };
 }
 
 /**
@@ -97,6 +116,11 @@ function classifyAiError(err) {
   if (err instanceof AiError) return { reason: err.reason, retryable: err.reason !== 'ai_refusal' };
   const status = err && typeof err.status === 'number' ? err.status : null;
   const name = (err && err.name) || '';
+  // 스트림 도중 SSE error 이벤트 (HTTP 200 이후) — status 없이 error.type 만 옴
+  const type = (err && (err.type || (err.error && err.error.type) || (err.error && err.error.error && err.error.error.type))) || '';
+  if (!status && type === 'overloaded_error') return { reason: 'ai_unavailable', retryable: true, status: 529 };
+  if (!status && type === 'rate_limit_error') return { reason: 'ai_rate_limited', retryable: true, status: 429 };
+  if (!status && type === 'api_error') return { reason: 'ai_unavailable', retryable: true, status: 500 };
   if (name === 'AbortError' || name === 'APIUserAbortError' || /timeout/i.test(name)) return { reason: 'ai_timeout', retryable: true, status };
   if (name === 'APIConnectionError') return { reason: 'ai_network', retryable: true, status };
   if (status === 429) return { reason: 'ai_rate_limited', retryable: true, status };

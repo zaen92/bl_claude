@@ -91,3 +91,41 @@ test('SDK 타임아웃(AbortSignal) → ai_timeout', async () => {
     });
   } finally { srv.closeAllConnections(); srv.close(); }
 });
+
+test('SDK: 응답 도중 SSE error(overloaded) → ai_unavailable, 부분 사용량(과금 하한) 기록', async () => {
+  const events = sse([
+    { type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 5000, output_tokens: 1 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '{"title_1":"부분' } },
+    { type: 'message_delta', delta: { stop_reason: null, stop_sequence: null }, usage: { output_tokens: 300 } },
+  ]) + `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })}\n\n`;
+  const { srv, url } = await startServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(events);
+  });
+  try {
+    const client = new Anthropic({ apiKey: 'k', baseURL: url, maxRetries: 0 });
+    await assert.rejects(runClaude(client, buildClaudeRequest({ model: 'claude-sonnet-4-6', maxTokens: 10, prompt: 'P', images: [], webSearchMaxUses: 0 })), (e) => {
+      assert.equal(classifyAiError(e).reason, 'ai_unavailable');
+      assert.equal(e.aiMeta.responseStarted, true);
+      assert.equal(e.aiMeta.usage.inputTokens, 5000);
+      assert.equal(e.aiMeta.usage.outputTokens, 300);
+      return true;
+    });
+  } finally { srv.close(); }
+});
+
+test('SDK: 연결 전 오류(529)는 응답 시작 전 → responseStarted=false (과금 없음으로 기록)', async () => {
+  const { srv, url } = await startServer((req, res) => {
+    res.writeHead(529, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'x' } }));
+  });
+  try {
+    const client = new Anthropic({ apiKey: 'k', baseURL: url, maxRetries: 0 });
+    await assert.rejects(runClaude(client, buildClaudeRequest({ model: 'claude-sonnet-4-6', maxTokens: 10, prompt: 'P', images: [], webSearchMaxUses: 0 })), (e) => {
+      assert.equal(e.aiMeta.responseStarted, false);
+      assert.equal(e.aiMeta.usage.inputTokens, 0);
+      return true;
+    });
+  } finally { srv.close(); }
+});

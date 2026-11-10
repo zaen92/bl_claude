@@ -7,7 +7,8 @@
   },
   "scripts": {
     "test:unit": "node --test \"test/unit/*.test.js\"",
-    "test:live": "node --test \"test/live/*.test.js\""
+    "test:live": "node --test \"test/live/*.test.js\"",
+    "test:live:check": "node --test --test-name-pattern=L0 \"test/live/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.7.0",

@@ -229,18 +229,50 @@ test('속도 제한(분당)·일일 한도·저장 용량 초과는 차감 없�
   assert.equal(u.usage.dayCount, 3);
 });
 
-test('토큰 사용량·예상 비용·지연시간 기록', async () => {
+test('토큰 사용량·예상 비용·서버 비용·품질 → generationMetrics(관리자 전용) / opsDaily 집계, 사용자 문서엔 비용 없음', async () => {
   await newUser('u10');
   const r = await service.generate(deps(), CFG, { uid: 'u10', input: input({ images: [JPEG] }) });
   const g = (await db.doc(`generations/${r.generationId}`).get()).data();
-  assert.ok(g.usage.inputTokens > 0 && g.usage.outputTokens > 0);
-  assert.equal(g.usage.webSearchRequests, 2);
-  const expected = Math.round((g.usage.inputTokens * 3 / 1e6 + g.usage.outputTokens * 15 / 1e6 + 2 * 0.01) * 1e6) / 1e6;
-  assert.equal(g.costUsd, expected);
+  assert.equal(g.usage, undefined);
+  assert.equal(g.costUsd, undefined);
   assert.equal(g.model, 'claude-sonnet-4-6');
-  assert.equal(typeof g.latencyMs, 'number');
-  assert.equal(g.provider, 'mock');
-  assert.ok(!JSON.stringify(g).includes('sk-ant'), '키 미기록');
+  const m = (await db.doc(`generationMetrics/${r.generationId}`).get()).data();
+  assert.ok(m.usage.inputTokens > 0 && m.usage.outputTokens > 0);
+  assert.equal(m.usage.webSearchRequests, 2);
+  const expected = Math.round((m.usage.inputTokens * 3 / 1e6 + m.usage.outputTokens * 15 / 1e6 + 2 * 0.01) * 1e6) / 1e6;
+  assert.equal(m.costUsd, expected);
+  assert.equal(m.costBreakdown.webSearch, 0.02);
+  assert.deepEqual([m.status, m.billing, m.provider, m.imageCount, m.volume], ['succeeded', 'full', 'mock', 1, 'normal']);
+  assert.equal(typeof m.latencyMs, 'number');
+  assert.equal(typeof m.computeUsdEst, 'number');
+  assert.ok(Array.isArray(m.qualityFlags));
+  assert.ok(m.photoBytes > 0);
+  for (const k of ['input', 'title', 'content', 'email']) assert.equal(m[k], undefined, `metrics 에 ${k} 없음`);
+  const ops = (await db.doc(`opsDaily/${service.kstDay(Date.now())}`).get()).data();
+  assert.ok(ops.succeeded >= 1 && ops.aiCostUsd > 0);
+  assert.ok(ops.byModel['claude-sonnet-4-6'].count >= 1);
+  assert.ok(!JSON.stringify(g).includes('sk-ant') && !JSON.stringify(m).includes('sk-ant'), '키 미기록');
+  // 사진 보관 만료일 = 생성 + 90일
+  assert.equal(g.photosState, 'stored');
+  const days = (g.photosExpireAt.toMillis() - Date.now()) / 86400000;
+  assert.ok(days > 89.9 && days <= 90.01, String(days));
+});
+
+test('실패한 호출의 비용 기록: 응답 전 오류=과금 없음(none), 응답 도중 끊김=부분 사용량(하한)', async () => {
+  await newUser('u10f');
+  const a = input({ memo: '[[mock:error]]' });
+  await assert.rejects(service.generate(deps(), CFG, { uid: 'u10f', input: a }));
+  const ma = (await db.doc(`generationMetrics/${service.generationIdOf('u10f', a.clientRequestId)}`).get()).data();
+  assert.deepEqual([ma.status, ma.billing, ma.aiCallStarted, ma.failureReason], ['failed', 'none', true, 'ai_unavailable']);
+  const b = input({ memo: '[[mock:midstream]]' });
+  await assert.rejects(service.generate(deps(), CFG, { uid: 'u10f', input: b }));
+  const mb = (await db.doc(`generationMetrics/${service.generationIdOf('u10f', b.clientRequestId)}`).get()).data();
+  assert.equal(mb.billing, 'partial_lower_bound');
+  assert.equal(mb.usage.outputTokens, 120);
+  assert.ok(mb.costUsd > 0);
+  const ops = (await db.doc(`opsDaily/${service.kstDay(Date.now())}`).get()).data();
+  assert.ok(ops.failed >= 2 && ops.aiCostUsdFailed > 0);
+  assert.equal((await assertInvariant('u10f')).credits, 2);
 });
 
 test('무료 우선 사용 & 실패 시 차감했던 버킷으로 복구', async () => {

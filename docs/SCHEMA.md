@@ -58,7 +58,7 @@
 |---|---|---|
 | name | string | `크레딧 10회` |
 | credits | int > 0 | 10 / 30 / 70 |
-| price | int > 0 (원) | ⚠️ 시드값 4,900 / 12,900 / 27,900 은 **예시**, 확정 필요 |
+| price | int > 0 (원) | ⚠️ 미확정 — 실측 원가 확인 후 `seed --prices` 로 지정 (로컬 예시값만 존재) |
 | currency | `'KRW'` | |
 | active | bool | 판매 여부 |
 | sortOrder | int | |
@@ -89,16 +89,18 @@
 | uid / clientRequestId | string | |
 | status | string | `processing`(1크레딧 예약됨) → `succeeded`(차감 확정) / `failed`(크레딧 복구됨) |
 | input | map | `{title, type, content, memo, info, volume, imageCount}` (사진 원본은 Storage) |
-| photos | list | `[{path, bytes, contentType, index}]` — `users/{uid}/generations/{id}/photo_N.jpg` |
+| photos | list | `[{path, bytes, contentType, index}]` — `users/{uid}/generations/{id}/photo_N.jpg` (보관 기간 후 삭제되면 `[]`) |
 | photoBytesReserved | int | 예약한 저장 용량 (실패 시 반환) |
+| photosState | string | `none` · `pending`(업로드 중) · `stored` · `deleting` · `deleted` |
+| photosExpireAt | Timestamp\|null | 보관 검사 시각 (생성 + 90일, 저장 글이 참조하면 7일씩 연장) |
+| photosKeptBy / photosCheckedAt / photosDeletedAt | | 보관 검사 기록 |
 | result | map\|null | GenerationResult |
 | naver | map\|null | `{name, address, tel, category, link}` |
 | provider | string | `anthropic` / `mock`(에뮬레이터) |
 | model | string | 실제 응답한 Claude 모델 ID |
 | charge | map | `{status:'reserved'\|'captured'\|'refunded', amount:1, ledgerId:'gen_{id}', bucketDelta, refundLedgerId}` |
-| usage | map | `{inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, webSearchRequests}` |
-| costUsd | number | 정가 기준 **예상** 비용 (functions/src/config/pricing.js) |
-| latencyMs / stopReason / apiRequestCount | | 진단용 |
+
+> 토큰·비용은 STEP 2.5 부터 사용자가 읽을 수 없는 `generationMetrics` 로 분리했습니다.
 | error | map\|null | `{reason, message(사용자용), retryable}` — 오류 원문·개인정보 미기록 |
 | leaseExpiresAt | Timestamp\|null | 처리 중 건의 만료 시각 (지나면 자동 복구) |
 | createdAt / updatedAt / completedAt | Timestamp | |
@@ -120,6 +122,23 @@
 ### GenerationResult (기존 resultData 와 동일)
 `title_1, title_2, title_3, keyword_main, keyword_sub, keyword_location, keyword_intent, place_name, place_address, place_hours, place_price, body, hashtags[], reel, thumbnail`
 
+## 운영 컬렉션 (서버 전용 쓰기 · 관리자만 읽기, STEP 2.5)
+### generationMetrics/{generationId}
+생성 1건의 비용·품질 (입력 내용·이메일 없음, 회원 탈퇴 후에도 회계용으로 보관):
+`uid, generationId, status, provider, model, type, volume, imageCount, photoBytes, usage{inputTokens,outputTokens,cacheCreationInputTokens,cacheReadInputTokens,webSearchRequests}, costUsd, costKnown, costBreakdown{input,output,cacheWrite,cacheRead,webSearch}, billing('full'|'none'|'partial_lower_bound'|'unknown'), aiCallStarted, apiRequestCount, latencyMs, computeUsdEst, failureReason, qualityFlags[], day('YYYY-MM-DD' KST), createdAt`
+
+### opsDaily/{YYYY-MM-DD}  (KST)
+`succeeded, failed, aiCostUsd, aiCostUsdFailed, inputTokens, outputTokens, webSearchRequests, computeUsdEst, photoBytesAdded, byModel{<model>:{count,costUsd}}` — 일일 비용 상한 판단
+
+### photoDeletionJobs/{jobId}
+`type('generation'|'paths'|'prefix'), uid, generationId?, paths[], prefix?, bytesToRelease, reason, status('pending'|'running'|'done'|'failed'), attempts, lastError{code,message}, nextAttemptAt, createdAt, doneAt` — ID: `gen_{generationId}` · `failed_{generationId}` · `user_{uid}`
+
+### accountDeletions/{uid}
+`source('user_request'|'auth_trigger'), status('running'|'done'|'storage_pending'), storage, posts, generations, startedAt, completedAt`
+
+### config/service  (관리자 읽기·쓰기)
+`generationEnabled(bool), pauseMessage(string ≤200), dailyCostLimitUsd(number)` — 재배포 없이 생성 일시중지·비용 상한 변경
+
 ## signupGrants/{sha256(정규화 이메일)}  (비공개)
 읽기·쓰기: 🖥️ 전용 (관리자 클라이언트도 불가)
 `{uid, amount, grantedAt}` — 계정을 삭제하고 같은 이메일(Gmail 점/`+태그` 변형 포함)로 재가입해도 보너스를 다시 받지 못하게 합니다. 이메일 원문은 저장하지 않습니다.
@@ -132,4 +151,4 @@
 보관 정책·비용: [STORAGE.md](STORAGE.md)
 
 ## 인덱스
-`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, generations 의 `status ASC + leaseExpiresAt ASC`(스테일 복구 스케줄러).
+`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, generations `status + leaseExpiresAt`(스테일 복구), generations `photosState + photosExpireAt`(사진 보관), photoDeletionJobs `status + nextAttemptAt`, posts `uid + generationId`(참조 확인).

@@ -15,7 +15,10 @@
     "set-admin": "node scripts/set-admin.mjs",
     "test:security": "npm run build && node --test tests/security/*.test.mjs",
     "test:live": "npm --prefix functions run test:live",
-    "test:e2e": "node tests/e2e/smoke.cjs"
+    "test:e2e": "node tests/e2e/smoke.cjs",
+    "test:live:check": "npm --prefix functions run test:live:check",
+    "benchmark": "node scripts/live-benchmark.mjs",
+    "cost-report": "node scripts/cost-report.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^6.0.0",

@@ -30,6 +30,16 @@ App Check 는 "우리 웹앱에서 온 요청인지"를 확인해, 탈취된 ID 
 
 > 에뮬레이터는 App Check 토큰을 검증하지 않으므로, 강제 동작 확인은 실제 프로젝트에서 해야 합니다. (이번 단계에서 미실행)
 
+## 출시 전 점검표
+- [ ] reCAPTCHA Enterprise 사이트 키: 운영 도메인만 등록 (localhost 는 개발용 키로 분리)
+- [ ] Firebase 콘솔 App Check 에 웹 앱 등록, 토큰 TTL 기본값(1시간) 확인
+- [ ] `VITE_APPCHECK_SITE_KEY` 로 빌드 → 배포 → App Check 지표에서 Functions "확인된 요청" 비율 확인
+- [ ] 디버그 토큰은 개발 기기에만, 운영 빌드에 `VITE_APPCHECK_DEBUG_TOKEN` 이 없는지 확인
+- [ ] `functions/.env` `ENFORCE_APP_CHECK=true` → `npx firebase deploy --only functions`
+- [ ] 강제 후: 디버그 토큰 없는 스크립트에서 callable 호출 시 거부되는지 확인
+- [ ] (선택) Firestore·Storage 도 App Check 적용
+- [ ] 관리자 계정으로 앱 → 내 계정 → "🛠 AI 설정 점검" 에서 `App Check 강제 ✅` 표시 확인
+
 ## 주의
 - reCAPTCHA Enterprise 는 월 무료 평가 한도를 넘으면 과금됩니다.
 - App Check 는 비용 방어의 한 겹일 뿐이며, 서버의 크레딧·분당/일일 한도가 최종 방어선입니다.
