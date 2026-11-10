@@ -1,0 +1,16 @@
+node_modules/
+web/dist/
+.emulator-data/
+*.log
+firebase-debug.*
+firestore-debug.log
+ui-debug.log
+.secret.local
+functions/.secret.local
+functions/.env.local
+.env
+.env.local
+web/.env.local
+service-account*.json
+.DS_Store
+tests/e2e/screenshots/

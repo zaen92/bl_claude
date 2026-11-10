@@ -1,0 +1,96 @@
+rules_version = '2';
+
+// 잰잇 블로그 스튜디오 Firestore 보안 규칙
+// 원칙
+//  1) 크레딧 잔액(users.credits)·원장(creditLedger)·주문(orders)·생성기록(generations)은
+//     Cloud Functions(Admin SDK)만 쓴다. Admin SDK 는 규칙을 우회하므로 여기서는 클라이언트 쓰기를 전부 막는다.
+//  2) 사용자는 자기 데이터만 읽는다. 관리자(custom claim admin == true)는 모두 읽을 수 있다.
+//  3) 관리자 클라이언트 쓰기는 상품(creditPackages)에만 허용한다. 잔액 조정은 adminAdjustCredits 함수로만.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function ownsExisting() { return signedIn() && resource.data.uid == request.auth.uid; }
+
+    // ── users/{uid} ───────────────────────────────────
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      // 생성은 ensureUserProfile 함수만. 사용자는 표시 이름만 수정 가능.
+      allow create, delete: if false;
+      allow update: if isSelf(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 1
+        && request.resource.data.displayName.size() <= 40
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    // ── creditLedger/{entryId} : 읽기 전용 원장 ──────────
+    match /creditLedger/{entryId} {
+      allow read: if ownsExisting() || isAdmin();
+      allow write: if false;
+    }
+
+    // ── creditPackages/{packageId} : 공개 상품 목록 ─────
+    match /creditPackages/{packageId} {
+      allow read: if true;
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll(['name', 'credits', 'price', 'currency', 'active', 'sortOrder'])
+        && request.resource.data.name is string
+        && request.resource.data.credits is int && request.resource.data.credits > 0
+        && request.resource.data.price is int && request.resource.data.price > 0
+        && request.resource.data.currency == 'KRW'
+        && request.resource.data.active is bool
+        && request.resource.data.sortOrder is int;
+      allow delete: if isAdmin();
+    }
+
+    // ── orders/{orderId} : 결제 주문 (서버 전용 쓰기) ─────
+    match /orders/{orderId} {
+      allow read: if ownsExisting() || isAdmin();
+      allow write: if false;
+    }
+
+    // ── generations/{generationId} : AI 생성 기록 (서버 전용 쓰기) ──
+    match /generations/{generationId} {
+      allow read: if ownsExisting() || isAdmin();
+      allow write: if false;
+    }
+
+    // ── posts/{postId} : 사용자가 저장한 글 ───────────────
+    function validPost(d) {
+      return d.keys().hasOnly(['uid', 'title', 'type', 'data', 'generationId', 'legacyId', 'legacySavedAt', 'createdAt', 'updatedAt'])
+        && d.keys().hasAll(['uid', 'title', 'data', 'createdAt', 'updatedAt'])
+        && d.uid == request.auth.uid
+        && d.title is string && d.title.size() <= 300
+        && (!('type' in d) || d.type is string && d.type.size() <= 20)
+        && d.data is map
+        && (!('generationId' in d) || d.generationId == null || d.generationId is string)
+        && (!('legacyId' in d) || d.legacyId is int || d.legacyId is string)
+        && d.updatedAt == request.time;
+    }
+    match /posts/{postId} {
+      allow read: if ownsExisting() || isAdmin();
+      // 기존 localStorage 글 이전 시 중복 확인용: 아직 없는 자기 legacy 문서 ID 조회만 허용
+      allow get: if signedIn() && resource == null
+        && postId.matches('legacy_' + request.auth.uid + '_[A-Za-z0-9_-]+');
+      allow create: if signedIn() && validPost(request.resource.data)
+        && request.resource.data.createdAt == request.time;
+      allow update: if ownsExisting() && validPost(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if ownsExisting();
+    }
+
+    // ── signupGrants/{emailHash} : 가입 보너스 이력 (서버 전용, 비공개) ──
+    match /signupGrants/{key} {
+      allow read, write: if false;
+    }
+
+    // 그 외 모든 경로 차단
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
