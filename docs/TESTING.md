@@ -5,7 +5,10 @@
 npm run test:unit       # 순수 로직 + 실제 SDK ↔ 가짜 HTTP 서버 + live 테스트 하네스 점검 (에뮬레이터 불필요)
 npm run test:security   # 웹 빌드 후 번들·소스·git·로그 호출에서 비밀값/개인정보/토큰 URL 검사
 npm run test:emu        # Auth+Firestore+Functions+Storage 에뮬레이터: 규칙·크레딧·생성·안정화·callable
-npm test                # 위 3개
+npm run staging-check:emu # 스테이징 종합 점검 스크립트를 에뮬레이터로 실행 (Claude=mock)
+npm test                # 위 4개
+npm run preflight:staging # 배포 사전 점검 (배포하지 않음)
+npm run staging-check -- --project <스테이징 ID> --yes  # ⚠️ 배포된 스테이징 + 실제 Claude
 npm run test:live:check # ⚠️ 실제 API — 키·모델·웹검색 지원 확인 (과금 없음, 키 필요)
 npm run test:live       # ⚠️ 실제 API — 텍스트·사진·웹검색·JSON (비용 발생, 키 필요, 키 없으면 실패)
 ```
@@ -14,17 +17,19 @@ npm run test:live       # ⚠️ 실제 API — 텍스트·사진·웹검색·JS
 > **mock 과 실제 API 구분**: 에뮬레이터·E2E 의 생성은 `functions/src/ai/mockClient.js`(가짜 Claude)를 사용합니다. 크레딧 예약·확정·복구, Storage, 스트리밍, 화면 흐름은 실제 코드 그대로지만 **Claude 응답은 mock** 입니다.
 > 실제 Claude 연동은 `test:live` 로만 검증되며, 이 작업 환경에는 API 키가 없어 **미실행(키 없음 → 실패로 종료)** 입니다.
 
-## 최근 실행 결과 (2026-11-10, STEP 2.5)
+## 최근 실행 결과 (2026-11-11, STEP 2.6)
 | 묶음 | 결과 | 종류 |
 |---|---|---|
 | `test:unit` | **31 / 31 통과** | 단위, SDK 와이어(가짜 서버), live 하네스(가짜 서버), 비용 분석 |
 | `test:security` | **5 / 5 통과** | 정적 검사 |
-| `test:emu` | **59 / 59 통과** | 에뮬레이터 (Claude = mock) |
+| `test:emu` | **60 / 60 통과** | 에뮬레이터 (Claude = mock) — 스테이징 허용 목록 포함 |
+| `staging-check:emu` | **19 / 19 확인 통과** | 스테이징 점검 스크립트 자체 검증 (Claude = mock, Storage = 에뮬레이터) |
 | `test:e2e` (Chromium) | **17 / 17 확인 통과**, 콘솔 오류 0 | 브라우저 (Claude = mock) |
-| `test:live` | **미실행** — 키 없음 (L0 실패, L1~L3 skip, exit 1) | 실제 API |
+| `preflight:staging` | 미준비 4개 → exit 1 (배포 차단 동작 확인) | 정적 점검 |
+| `test:live` / `staging-check --yes` | **미실행** — API 키·Firebase 프로젝트 없음 | 실제 API·실제 Firebase |
 
-## 1) 실제 API 로 검증한 항목
-없음. (키가 없음. 키 등록 후 [LIVE_VERIFICATION.md](LIVE_VERIFICATION.md) 순서대로 실행)
+## 1) 실제 API·실제 Firebase 로 검증한 항목
+없음. (키·스테이징 프로젝트가 없음. 준비 후 [STAGING_SETUP.md](STAGING_SETUP.md) 5절 순서대로 실행)
 
 ## 2) Mock·가짜 서버로만 검증한 항목
 | 항목 | 검증 위치 |

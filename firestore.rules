@@ -96,7 +96,9 @@ service cloud.firestore {
     match /config/{docId} {
       allow read: if isAdmin();
       allow write: if isAdmin() && docId == 'service'
-        && request.resource.data.keys().hasOnly(['generationEnabled', 'pauseMessage', 'dailyCostLimitUsd', 'updatedAt', 'updatedBy'])
+        && request.resource.data.keys().hasOnly(['generationEnabled', 'pauseMessage', 'dailyCostLimitUsd', 'accessMode', 'allowedEmails', 'updatedAt', 'updatedBy'])
+        && (!('accessMode' in request.resource.data) || request.resource.data.accessMode in ['open', 'allowlist'])
+        && (!('allowedEmails' in request.resource.data) || request.resource.data.allowedEmails is list && request.resource.data.allowedEmails.size() <= 200)
         && (!('generationEnabled' in request.resource.data) || request.resource.data.generationEnabled is bool)
         && (!('pauseMessage' in request.resource.data) || request.resource.data.pauseMessage is string && request.resource.data.pauseMessage.size() <= 200)
         && (!('dailyCostLimitUsd' in request.resource.data) || request.resource.data.dailyCostLimitUsd is number && request.resource.data.dailyCostLimitUsd >= 0);

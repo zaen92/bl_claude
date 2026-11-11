@@ -69,12 +69,19 @@ let gateCache = { at: 0, value: null };
  * config/service: { generationEnabled: bool, pauseMessage?: string, dailyCostLimitUsd?: number }
  * opsDaily/{KST day}.aiCostUsd 가 상한 이상이면 신규 생성 거부 (크레딧 차감 없음)
  */
-async function checkServiceGate(db, cfg, nowMs, { cacheMs = 30_000 } = {}) {
+async function checkServiceGate(db, cfg, nowMs, { cacheMs = 30_000, caller = null } = {}) {
   if (!gateCache.value || nowMs - gateCache.at > cacheMs) {
     const s = await db.collection(COL.CONFIG).doc('service').get();
     gateCache = { at: nowMs, value: s.exists ? s.data() : {} };
   }
   const c = gateCache.value;
+  // 스테이징: 허용 목록 모드 (설정이 없으면 관리자만 — fail closed)
+  const mode = c.accessMode || cfg.accessMode || 'open';
+  if (mode === 'allowlist') {
+    const email = caller && caller.email ? String(caller.email).toLowerCase() : null;
+    const allowed = (caller && caller.admin === true) || (email && Array.isArray(c.allowedEmails) && c.allowedEmails.map((e) => String(e).toLowerCase()).includes(email));
+    if (!allowed) throw new CreditError('permission-denied', '테스트 기간에는 초대된 계정만 이용할 수 있어요.', { reason: 'not_allowlisted' });
+  }
   if (c.generationEnabled === false) {
     throw new CreditError('unavailable', c.pauseMessage || '서비스 점검 중이에요. 잠시 후 다시 이용해주세요.', { reason: 'service_paused' });
   }
@@ -364,7 +371,7 @@ async function getStatus(db, bucket, { uid, generationId, nowMs }) {
  * @param {object} cfg  runtimeConfig()
  * @param {{uid:string, input:object, onChunk?:Function}} req
  */
-async function generate(deps, cfg, { uid, input, onChunk }) {
+async function generate(deps, cfg, { uid, input, onChunk, caller }) {
   const { db, bucket, ai, logger } = deps;
   const now = deps.now || Date.now;
   const generationId = generationIdOf(uid, input.clientRequestId);
@@ -373,7 +380,7 @@ async function generate(deps, cfg, { uid, input, onChunk }) {
 
   // 같은 요청의 재전송이면 게이트와 무관하게 기존 결과를 돌려준다
   const prev = await db.collection(COL.GENERATIONS).doc(generationId).get();
-  if (!prev.exists) await checkServiceGate(db, cfg, now(), { cacheMs: deps.gateCacheMs });
+  if (!prev.exists) await checkServiceGate(db, cfg, now(), { cacheMs: deps.gateCacheMs, caller });
 
   const res = await reserve(db, { uid, generationId, input, imageBytes, cfg, provider: ai.provider, nowMs: now() });
   if (!res.reserved) {

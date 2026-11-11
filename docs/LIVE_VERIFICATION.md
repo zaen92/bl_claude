@@ -16,42 +16,19 @@
 
 `web_search_20260209` 은 동적 필터링을 위해 내부적으로 코드 실행을 사용합니다 (추가 요금 없음, 토큰만 과금). 이 서비스는 `WEB_SEARCH_TOOL_TYPE=auto` 로 이 버전을 사용합니다.
 
-## 1. Anthropic API 키 만들기
-1. [Claude Console](https://platform.claude.com) 로그인 → **Settings → API Keys → Create Key**
-   - 이름 예: `jaeinit-prod-functions` (운영), `jaeinit-dev` (개발) — **운영과 개발 키를 분리**
-   - 생성 직후 한 번만 표시되므로 바로 다음 단계에서 등록
-2. **Settings → Limits** 에서 월 지출 한도(spend limit) 설정 (예: 첫 달 $50)
-3. **Settings → Capabilities** 에서 웹 검색이 꺼져 있지 않은지 확인
-4. 이전 버전(v3)에서 브라우저에 넣었던 키가 있다면 **Console 에서 삭제(revoke)** 하세요
-
-## 2. Secret Manager 에 등록 (키는 화면·파일·채팅에 붙여넣지 마세요)
-```bash
-npx firebase use <프로젝트ID>
-```
-```bash
-npx firebase functions:secrets:set ANTHROPIC_API_KEY
-```
-프롬프트가 나오면 키를 붙여넣고 Enter (입력값은 화면에 표시되지 않음). 네이버 검색을 쓰지 않으면 아래 두 값에 `-` 입력:
-```bash
-npx firebase functions:secrets:set NAVER_CLIENT_ID
-```
-```bash
-npx firebase functions:secrets:set NAVER_CLIENT_SECRET
-```
-등록 확인 (값은 출력되지 않음):
-```bash
-npx firebase functions:secrets:get ANTHROPIC_API_KEY
-```
-키를 바꾼 뒤에는 Functions 를 다시 배포해야 새 버전이 적용됩니다 (`npx firebase deploy --only functions`). 이전 버전은 `npx firebase functions:secrets:prune` 으로 정리.
+## 1~2. Anthropic 키 만들기 · Secret Manager 등록
+[STAGING_SETUP.md](STAGING_SETUP.md) 2절(워크스페이스 `jaeinit-staging`/`jaeinit-prod` 분리, 지출 한도, 워크스페이스 전용 키)과 4절(`functions:secrets:set ... --project staging`)을 따르세요.
+- 개발용 키 → **스테이징 프로젝트** Secret Manager, 운영용 키 → **운영 프로젝트** Secret Manager (프로젝트가 다르므로 자연히 분리)
+- 키를 바꾼 뒤에는 Functions 를 다시 배포해야 새 버전이 적용됩니다. 이전 버전 정리: `npx firebase functions:secrets:prune --project staging`
 
 ## 3. 로컬에서 실제 API 검증 (`test:live`)
 키를 셸 기록에 남기지 않도록 Secret Manager 에서 바로 읽어 환경변수로 넘깁니다 (gcloud CLI 필요, 권한: Secret Manager Secret Accessor):
 ```bash
-ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<프로젝트ID>)" npm run test:live:check
+ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<스테이징 ID>)" npm run test:live:check
 ```
 `test:live:check` 는 키 형식·모델 ID·웹 검색 지원만 확인합니다 (**과금 없음**). 통과하면 전체 검증:
 ```bash
-ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<프로젝트ID>)" npm run test:live
+ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<스테이징 ID>)" npm run test:live
 ```
 | 단계 | 확인 내용 | 예상 비용 |
 |---|---|---|
@@ -88,11 +65,11 @@ ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_AP
 ## 6. 비용 측정 (상품 가격 결정 전)
 무료 사전 측정 (입력 토큰만):
 ```bash
-ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<프로젝트ID>)" npm run benchmark -- --count-only
+ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<스테이징 ID>)" npm run benchmark -- --count-only
 ```
 실제 측정 (사진 0/3/5/10장 × 짧은/보통/긴 글 = 12회, 약 $1.5~3 예상). 실제 사진 폴더를 쓰는 것을 권장:
 ```bash
-ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<프로젝트ID>)" npm run benchmark -- --yes --photos-dir ./samples
+ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_API_KEY --project=<스테이징 ID>)" npm run benchmark -- --yes --photos-dir ./samples
 ```
 모델 비교: `--models claude-sonnet-4-6,claude-sonnet-5-5`. 결과는 `cost-reports/` (gitignore).
 손익 계산 (가격은 확정하지 않음 — 손익분기·목표 마진 가격만 계산):

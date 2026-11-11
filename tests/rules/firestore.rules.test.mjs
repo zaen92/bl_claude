@@ -183,5 +183,8 @@ test('운영 컬렉션(비용·삭제작업·탈퇴기록·설정): 일반 사�
   await assertFails(setDoc(doc(admin(), 'photoDeletionJobs/gen_x'), { status: 'done' }));
   await assertSucceeds(setDoc(doc(admin(), 'config/service'), { generationEnabled: false, pauseMessage: '점검 중', dailyCostLimitUsd: 20 }));
   await assertFails(setDoc(doc(admin(), 'config/service'), { generationEnabled: 'no' }));
+  await assertSucceeds(setDoc(doc(admin(), 'config/service'), { accessMode: 'allowlist', allowedEmails: ['t@x.com'] }));
+  await assertFails(setDoc(doc(admin(), 'config/service'), { accessMode: 'everyone' }));
+  await assertFails(setDoc(doc(alice(), 'config/service'), { accessMode: 'open' }));
   await assertFails(setDoc(doc(admin(), 'config/other'), { generationEnabled: false }));
 });

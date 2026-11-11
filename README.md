@@ -1,4 +1,4 @@
-# ✍️ 잰잇 블로그 스튜디오 — SaaS (STEP 2.5)
+# ✍️ 잰잇 블로그 스튜디오 — SaaS (STEP 2.6)
 
 `jaeinit_blog_studio_v3.html`(단일 HTML, 브라우저에서 Claude/네이버 API 직접 호출)을
 Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
@@ -6,7 +6,10 @@ Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
 - **STEP 1**: 모듈화 · Google/이메일 로그인 · 가입 무료 크레딧 2개(서버 원자 지급) · 스키마 · 보안 규칙
 - **STEP 2**: Cloud Functions 에서 **실제 Claude 생성**(기존 프롬프트·웹 검색·사진 분석/배치·네이버 검색) · **1회 1크레딧 차감/실패 시 자동 복구** · 멱등 키·동시성·속도/일일 한도 · 생성 상태 복구 · 생성 이력 · 사진 Cloud Storage 보관 · App Check 준비 · 토큰/비용 기록
 - **STEP 2.5 (안정화)**: 실제 API 검증 도구(`test:live`, 관리자 AI 점검), 공식 단가 재확인, 실패 호출 비용·일일 비용 상한·긴급 중지, 이중 환급 방지 검증, **사진 보관 정책(미저장 90일·저장 글 유지·탈퇴 시 삭제·삭제 재시도)**, 다운로드 토큰 제거(getBlob), 비용 벤치마크·손익 리포트, 보안 검토
+- **STEP 2.6 (스테이징 준비)**: 스테이징/운영 분리(`.env.staging`/`.env.prod`, 별칭), 스테이징 허용 목록 모드·STAGING 표시, 배포 사전 점검(`preflight`), 배포된 스테이징 종합 점검(`staging-check`, 실제 Claude·Storage), 운영자용 키 등록 가이드 → **[docs/STAGING_SETUP.md](docs/STAGING_SETUP.md)**
 - STEP 3 (예정): 토스페이먼츠 일회성 결제
+
+> 일반 사용자는 API 키를 입력하지 않습니다. 운영자가 발급한 Anthropic 키는 Firebase Secret Manager 에만 보관되고 서버(Cloud Functions)에서만 사용됩니다.
 
 > ⚠️ 이 작업 환경에는 Anthropic API 키가 없어 **실제 Claude 호출은 아직 검증되지 않았습니다.** 키가 없으면 `npm run test:live` 는 실패로 끝납니다. 키 등록·검증 절차: [docs/LIVE_VERIFICATION.md](docs/LIVE_VERIFICATION.md)
 
@@ -43,6 +46,8 @@ Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
 ├── scripts/seed.mjs  set-admin.mjs       # 상품 시드, 관리자 지정
 ├── scripts/live-benchmark.mjs            # 실제 API 비용 측정 (사진 장수 × 분량 × 모델)
 ├── scripts/cost-report.mjs               # 운영/벤치마크 비용 리포트 + 10/30/70회 손익
+├── scripts/preflight.mjs                 # 배포 전 사전 점검 (미준비 시 배포 차단)
+├── scripts/staging-check.mjs             # 배포된 스테이징 종합 점검 (실제 Claude·Storage, --emulator 지원)
 ├── storage.rules  storage.cors.json      # Storage 규칙, 운영 버킷 CORS
 ├── firestore.rules  storage.rules  firestore.indexes.json  firebase.json  .firebaserc
 └── docs/  ARCHITECTURE SCHEMA API TESTING NEXT_STEPS APP_CHECK STORAGE AI_COST LIVE_VERIFICATION SECURITY_REVIEW
@@ -81,7 +86,9 @@ npm test
 ```
 자세한 시나리오와 결과: [docs/TESTING.md](docs/TESTING.md)
 
-## Firebase 프로젝트 설정 (운영)
+## Firebase 프로젝트 설정
+> **스테이징 구축은 [docs/STAGING_SETUP.md](docs/STAGING_SETUP.md) 를 따르세요** (값 목록·콘솔·터미널 순서·과금). 아래는 전체 항목 요약입니다.
+
 1. [Firebase 콘솔](https://console.firebase.google.com)에서 프로젝트 생성 → **Blaze 요금제** (Functions·Secret Manager 필요)
 2. **Authentication** → 로그인 방법: `Google`, `이메일/비밀번호` 사용 설정. 설정 → 승인된 도메인에 배포 도메인 추가
 3. **Firestore** 생성 — 위치 `asia-northeast3 (서울)` 권장
@@ -126,4 +133,4 @@ npm test
 | 크레딧은 서버만 변경 | 보안 규칙에서 users.credits / creditLedger / orders / generations 클라이언트 쓰기 전면 차단 |
 | 비밀키 서버 보관 | 브라우저 키 저장 코드 삭제 + 기존 키 localStorage 에서 제거, Secret Manager 정의 |
 
-문서: [실제 API 검증](docs/LIVE_VERIFICATION.md) · [보안 검토](docs/SECURITY_REVIEW.md) · [기존 코드 분석](docs/ARCHITECTURE.md) · [스키마](docs/SCHEMA.md) · [API](docs/API.md) · [테스트](docs/TESTING.md) · [App Check](docs/APP_CHECK.md) · [사진 보관](docs/STORAGE.md) · [AI 비용](docs/AI_COST.md) · [다음 단계](docs/NEXT_STEPS.md)
+문서: **[스테이징·키 등록](docs/STAGING_SETUP.md)** · [실제 API 검증](docs/LIVE_VERIFICATION.md) · [보안 검토](docs/SECURITY_REVIEW.md) · [기존 코드 분석](docs/ARCHITECTURE.md) · [스키마](docs/SCHEMA.md) · [API](docs/API.md) · [테스트](docs/TESTING.md) · [App Check](docs/APP_CHECK.md) · [사진 보관](docs/STORAGE.md) · [AI 비용](docs/AI_COST.md) · [다음 단계](docs/NEXT_STEPS.md)

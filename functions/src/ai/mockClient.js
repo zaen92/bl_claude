@@ -48,6 +48,8 @@ function createMockClient() {
             if (opts.signal) opts.signal.addEventListener('abort', () => { clearTimeout(t); const e = new Error('aborted'); e.name = 'AbortError'; j(e); });
           });
           if (memo.includes('[[mock:error]]')) throw new MockApiError(500, 'InternalServerError');
+          // 실제 API 처럼: 디코딩할 수 없는 이미지는 400 (스테이징 점검 스크립트의 실패·복구 시나리오용)
+          if (params.messages[0].content.some((c) => c.type === 'image' && Buffer.from(c.source.data, 'base64').toString('latin1').startsWith('INVALID'))) throw new MockApiError(400, 'BadRequestError');
           yield { type: 'message_start', message: { id: 'msg_mock', model: params.model, usage: { input_tokens: 1800 + imageCount * 1500, output_tokens: 1 } } };
           if (memo.includes('[[mock:midstream]]')) {
             // 응답 도중 끊김 (과금이 시작된 뒤의 오류)

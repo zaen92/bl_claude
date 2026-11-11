@@ -15,6 +15,7 @@ const P = {
   DAILY_GENERATION_LIMIT: defineInt('DAILY_GENERATION_LIMIT', { default: 20 }),
   MAX_CONCURRENT_GENERATIONS: defineInt('MAX_CONCURRENT_GENERATIONS', { default: 2 }),
   STORAGE_QUOTA_MB: defineInt('STORAGE_QUOTA_MB', { default: 200 }),
+  ACCESS_MODE: defineString('ACCESS_MODE', { default: 'open', description: "open | allowlist — allowlist 면 config/service.allowedEmails 와 관리자만 AI 생성 가능 (스테이징용)" }),
   DAILY_COST_LIMIT_USD: defineInt('DAILY_COST_LIMIT_USD', { default: 30, description: '하루 AI 예상 비용 합계 상한 (USD). 0 이면 끔. config/service.dailyCostLimitUsd 가 있으면 그 값 우선' }),
 };
 
@@ -31,6 +32,7 @@ function runtimeConfig() {
     maxConcurrent: P.MAX_CONCURRENT_GENERATIONS.value(),
     storageQuotaBytes: P.STORAGE_QUOTA_MB.value() * 1024 * 1024,
     dailyCostLimitUsd: P.DAILY_COST_LIMIT_USD.value(),
+    accessMode: P.ACCESS_MODE.value(),
     leaseSeconds: 360, // generatePost timeoutSeconds(300) 보다 길어야 한다
   };
 }

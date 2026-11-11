@@ -9,6 +9,9 @@ import * as G from './generations.js';
 import { addImg } from './images.js';
 import { show, switchTab as baseSwitchTab, anim, cpId, cpTags, cpAll, cpTxt } from './render.js';
 
+/* ── 환경 표시 (스테이징 빌드에서만) ── */
+if (import.meta.env.VITE_ENV_LABEL) { g('envBadge').textContent = import.meta.env.VITE_ENV_LABEL; g('envBadge').hidden = false; }
+
 /* ── 보안: 이전 버전이 브라우저에 저장한 API 키 제거 ── */
 ['jaeinit_claude_key', 'jaeinit_naver_id', 'jaeinit_naver_sec'].forEach((k) => {
   try { if (localStorage.getItem(k) !== null) localStorage.removeItem(k); } catch (e) { /* ignore */ }

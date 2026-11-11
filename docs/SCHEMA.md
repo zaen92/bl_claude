@@ -137,7 +137,7 @@
 `source('user_request'|'auth_trigger'), status('running'|'done'|'storage_pending'), storage, posts, generations, startedAt, completedAt`
 
 ### config/service  (관리자 읽기·쓰기)
-`generationEnabled(bool), pauseMessage(string ≤200), dailyCostLimitUsd(number)` — 재배포 없이 생성 일시중지·비용 상한 변경
+`generationEnabled(bool), pauseMessage(string ≤200), dailyCostLimitUsd(number), accessMode('open'|'allowlist'), allowedEmails(string[] ≤200)` — 재배포 없이 생성 일시중지·비용 상한·스테이징 테스터 관리
 
 ## signupGrants/{sha256(정규화 이메일)}  (비공개)
 읽기·쓰기: 🖥️ 전용 (관리자 클라이언트도 불가)

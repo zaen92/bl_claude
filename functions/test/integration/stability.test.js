@@ -195,3 +195,24 @@ test('회원 탈퇴: 사진·글·생성 기록·프로필 삭제, 원장·비�
   const r2 = await deleteAccountData(db, bucket, 'w1', { source: 'auth_trigger' });
   assert.deepEqual([r2.posts, r2.generations], [0, 0]);
 });
+
+test('스테이징 허용 목록: allowlist 모드에서 초대된 이메일·관리자만 생성, 그 외 차감 없이 거부 (설정 없으면 관리자만)', async () => {
+  await newUser('al1'); await newUser('al2');
+  const cfg = { ...CFG, accessMode: 'allowlist' };
+  const ai = createMockClient();
+  // 설정 문서 없음 → 일반 사용자 거부 (fail closed)
+  await assert.rejects(service.generate(deps({ ai: { client: ai, provider: 'mock' } }), cfg, { uid: 'al1', input: input(), caller: { email: 'al1@x.com' } }), (e) => e.details.reason === 'not_allowlisted' && e.code === 'permission-denied');
+  // 관리자는 허용
+  await service.generate(deps(), cfg, { uid: 'al2', input: input(), caller: { email: 'al2@x.com', admin: true } });
+  // 초대 이메일 (대소문자 무시)
+  await db.doc('config/service').set({ allowedEmails: ['AL1@x.com'] });
+  service.resetGateCache();
+  await service.generate(deps(), cfg, { uid: 'al1', input: input(), caller: { email: 'al1@X.com' } });
+  // config 의 accessMode 가 env 보다 우선
+  await db.doc('config/service').set({ accessMode: 'open' });
+  service.resetGateCache();
+  await service.generate(deps(), cfg, { uid: 'al1', input: input(), caller: { email: 'someone@x.com' } });
+  assert.equal(ai.calls.length, 0);
+  assert.equal((await user('al1')).credits, 0);
+  assert.equal((await user('al2')).credits, 1);
+});

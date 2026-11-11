@@ -149,7 +149,7 @@ exports.generatePost = onCall({
     return await service.generate(
       { db: getFirestore(), bucket: getStorage().bucket(), ai, naver: naverDeps(), logger },
       runtimeConfig(),
-      { uid: auth.uid, input, onChunk: streaming ? (c) => { response.sendChunk(c).catch(() => {}); } : null },
+      { uid: auth.uid, input, caller: { email: auth.token.email || null, admin: auth.token.admin === true }, onChunk: streaming ? (c) => { response.sendChunk(c).catch(() => {}); } : null },
     );
   } catch (err) {
     throw toHttpsError(err);
@@ -224,6 +224,8 @@ exports.adminCheckAiConfig = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, secret
     webSearchMaxUses: cfg.webSearchMaxUses,
     naverConfigured: !!naverDeps(),
     appCheckEnforced: ENFORCE_APP_CHECK,
+    accessMode: cfg.accessMode,
+    projectId: process.env.GCLOUD_PROJECT || null,
     modelAvailable: null,
     webSearchSupported: null,
     error: null,

@@ -64,6 +64,7 @@
 | storage_quota | resource-exhausted | 차감 안 함 | 사진 저장 공간 부족 |
 | ai_not_configured | failed-precondition | 차감 안 함 | 관리자 문의 |
 | service_paused | unavailable | 차감 안 함 | `config/service.pauseMessage` |
+| not_allowlisted | permission-denied | 차감 안 함 | 테스트 기간 초대 계정만 |
 | daily_budget_exceeded | unavailable | 차감 안 함 | 오늘 이용량 많음 |
 | ai_timeout · ai_network · ai_rate_limited · ai_unavailable · internal | unavailable | **복구됨** | 재시도 가능 |
 | ai_config · ai_billing · ai_bad_request · ai_refusal | failed-precondition | **복구됨** | 재시도 불가/입력 수정 |
@@ -95,14 +96,17 @@
 | DAILY_GENERATION_LIMIT | 20 | 사용자별 일일(KST) 생성 요청 (실패 포함) |
 | MAX_CONCURRENT_GENERATIONS | 2 | 사용자별 동시 생성 |
 | STORAGE_QUOTA_MB | 200 | 사용자별 사진 보관 용량 |
+| ACCESS_MODE | open | `allowlist` 면 `config/service.allowedEmails` 와 관리자만 생성 (스테이징 기본값). 설정이 없으면 관리자만 |
 | DAILY_COST_LIMIT_USD | 30 | 서비스 전체 하루 AI 예상 비용 상한 (0=끔). `config/service.dailyCostLimitUsd` 가 있으면 우선 |
 | ENFORCE_APP_CHECK | false | 운영 배포 전 true |
 
+환경별 파일 (firebase-tools 가 프로젝트 별칭으로 자동 선택): `functions/.env.staging`(허용 목록·비용 상한 $10·App Check 단계 적용), `functions/.env.prod`(App Check 강제).
 `functions/.env.demo-jaeinit` (에뮬레이터 전용): `AI_MOCK=true` → 실제 API 대신 mock. 운영에서는 무시됨(`FUNCTIONS_EMULATOR` 확인). `functions/.env.local`(gitignore)에 `AI_MOCK=false` 를 두면 에뮬레이터에서 실제 API 사용 (확인됨).
 
 ## 런타임 운영 스위치 — `config/service` (관리자, Firestore 콘솔에서 수정)
 ```json
-{ "generationEnabled": false, "pauseMessage": "서비스 점검 중이에요 (14시 재개)", "dailyCostLimitUsd": 50 }
+{ "generationEnabled": false, "pauseMessage": "서비스 점검 중이에요 (14시 재개)", "dailyCostLimitUsd": 50,
+  "accessMode": "allowlist", "allowedEmails": ["tester@example.com"] }
 ```
 30초 이내 반영(인스턴스 캐시). 재배포 불필요.
 

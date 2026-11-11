@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:staging": "vite build --mode staging",
+    "build:prod": "vite build --mode prod"
   },
   "dependencies": {
     "firebase": "^13.2.0"
