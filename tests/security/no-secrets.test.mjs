@@ -50,8 +50,23 @@ test('Functions 로그에 입력 내용·이메일·키·토큰이 들어가지 
   }
 });
 
-test('Storage 다운로드 토큰을 만들지 않고, 웹은 getDownloadURL 을 쓰지 않는다', () => {
-  const fn = readFileSync(join(ROOT, 'functions/src/storage/photos.js'), 'utf8');
-  assert.ok(!/firebaseStorageDownloadTokens\s*:/.test(fn));
-  for (const f of walk(join(ROOT, 'web/src'))) assert.ok(!/getDownloadURL\s*\(/.test(readFileSync(f, 'utf8')), f);
+test('사진 미저장: Cloud Storage 를 쓰지 않고, 서버가 사진 데이터를 Firestore·로그에 남기지 않는다', () => {
+  const fnFiles = [join(ROOT, 'functions/index.js'), ...walk(join(ROOT, 'functions/src'))].filter((f) => f.endsWith('.js'));
+  for (const f of fnFiles) {
+    const src = readFileSync(f, 'utf8');
+    assert.ok(!/firebase-admin\/storage|@google-cloud\/storage|\.bucket\(/.test(src), `${f}: Storage 사용 금지`);
+  }
+  for (const f of walk(join(ROOT, 'web/src'))) {
+    const src = readFileSync(f, 'utf8');
+    assert.ok(!/from 'firebase\/storage'|getDownloadURL|getBlob\(/.test(src), `${f}: 웹에서 Storage 사용 금지`);
+  }
+  const fb = JSON.parse(readFileSync(join(ROOT, 'firebase.json'), 'utf8'));
+  assert.equal(fb.storage, undefined, 'firebase.json 에 storage 배포 없음');
+  assert.equal(fb.emulators.storage, undefined);
+  // 생성 서비스: input.images 를 Firestore 문서에 넣지 않음 (imageCount 만)
+  const svc = readFileSync(join(ROOT, 'functions/src/generation/service.js'), 'utf8');
+  const createBlock = svc.slice(svc.indexOf('tx.create(genRef, {'), svc.indexOf('});', svc.indexOf('tx.create(genRef, {')));
+  assert.ok(createBlock.length > 100, 'generations 생성 블록을 찾을 수 없음');
+  assert.ok(!/\bimages\s*:|:\s*input\.images\s*[,}\n]|\.\.\.input\b/.test(createBlock), 'generations 문서에 사진 배열 저장 금지');
+  assert.ok(/imageCount: input\.images\.length/.test(createBlock), '사진은 장수만 기록');
 });

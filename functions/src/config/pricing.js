@@ -32,9 +32,6 @@ const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 const COMPUTE_PRICING = { vcpuSecond: 0.000024, gibSecond: 0.0000025, perInvocation: 0.4 / 1e6, tierMultiplier: 1.0 };
 const GENERATE_FN_RESOURCES = { vcpu: 1, gib: 1 }; // generatePost: memory 1GiB (기본 vCPU 1)
 
-/** Cloud Storage 표준 저장 추정 단가 (USD / GB-월) — 리전별 상이, 콘솔 확인 필요 */
-const STORAGE_USD_PER_GB_MONTH = 0.026;
-
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 function priceOf(model) {
@@ -75,5 +72,5 @@ function estimateComputeUsd(latencyMs, res = GENERATE_FN_RESOURCES) {
 
 module.exports = {
   PRICING_VERIFIED_AT, MODEL_PRICING, WEB_SEARCH_USD_PER_REQUEST, CACHE_WRITE_5M_MULTIPLIER,
-  COMPUTE_PRICING, STORAGE_USD_PER_GB_MONTH, estimateCostUsd, estimateComputeUsd, priceOf,
+  COMPUTE_PRICING, estimateCostUsd, estimateComputeUsd, priceOf,
 };

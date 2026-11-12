@@ -7,11 +7,10 @@
 - 에뮬레이터는 App Check 토큰을 검증하지 않아 **강제 동작은 미검증**
 - 적용 순서·체크리스트: [APP_CHECK.md](APP_CHECK.md). 공개 전 반드시 `ENFORCE_APP_CHECK=true`
 
-## 2. Storage 다운로드 URL·토큰 노출 — ✅ (이번에 수정)
-- **발견**: STEP 2 는 서버가 사진마다 다운로드 토큰을 만들고 화면에서 `getDownloadURL` 로 토큰 URL 을 사용. 토큰 URL 은 **보안 규칙을 우회**해 링크만 있으면 누구나 열람 가능 (브라우저 기록·복사·공유로 유출 위험)
-- **조치**: 토큰 생성 제거, 화면은 `getBlob()`(로그인 토큰 + 규칙 적용)으로 받아 `blob:` URL 로만 표시
-- 운영 버킷에는 CORS 설정 필요 (`storage.cors.json` — [STORAGE.md](STORAGE.md))
-- 검증: 보안 정적 테스트(토큰 생성·getDownloadURL 사용 금지), E2E(사진 src 가 `blob:`, `token=` 요청 없음)
+## 2. 사진 데이터 — ✅ (서버 미저장으로 변경)
+- 사진은 Claude 분석용으로 요청 본문에서만 사용하고 **Cloud Storage·Firestore·로그에 저장하지 않음** → 다운로드 URL·토큰 노출, 타인 사진 접근, 보관 기간 관리 위험 자체가 없어짐
+- 저장 글 규칙: 텍스트 필드만, 본문에 `data:image` 섞이면 거부. JSON 내보내기·불러오기에서도 사진·Base64·키·토큰·크레딧·권한 제외
+- 검증: 보안 정적 테스트(Storage 미사용, 생성 기록에 사진 배열 금지), 통합·E2E(Firestore 문서·쓰기 요청에 사진 없음, Storage 요청 없음), JSON 단위 테스트
 
 ## 3. 회원별 데이터 접근 권한 — ✅
 | 데이터 | 본인 | 타인 | 관리자 | 검증 |
@@ -19,15 +18,14 @@
 | users | 읽기 + 표시이름 수정 | ✗ | 읽기 | rules 테스트 |
 | creditLedger / orders / generations | 읽기 | ✗ | 읽기 | rules 테스트 |
 | posts | CRUD (스키마 검증) | ✗ | 읽기 | rules 테스트 |
-| generationMetrics / opsDaily / photoDeletionJobs / accountDeletions | ✗ | ✗ | 읽기 | rules 테스트 (이번 추가) |
+| generationMetrics / opsDaily / accountDeletions | ✗ | ✗ | 읽기 | rules 테스트 (이번 추가) |
 | config/service | ✗ | ✗ | 읽기·쓰기(필드 검증) | rules 테스트 |
 | signupGrants | ✗ | ✗ | ✗ | rules 테스트 |
-| Storage `users/{uid}/**` | 읽기 | ✗ | 읽기 | storage rules 테스트, 쓰기는 모두 ✗ |
 | getGenerationStatus | 본인 기록만 | not-found | – | callable 테스트 |
 - **변경**: 생성 비용·토큰을 사용자가 읽을 수 있는 `generations` 에서 관리자 전용 `generationMetrics` 로 분리 (원가 정보 노출 방지)
 
 ## 4. 요청 속도·사용량 제한 — ✅
-- 사용자별: 분당 3회, 일일 20회(실패 포함), 동시 2건, 사진 200MB — 차감 전 거부 (통합 테스트)
+- 사용자별: 분당 3회, 일일 20회(실패 포함), 동시 2건 — 차감 전 거부 (사진은 요청당 10장·약 9MB 제한, 저장 용량 제한은 없음) (통합 테스트)
 - 서비스 전체: `DAILY_COST_LIMIT_USD`(기본 $30) 초과 시 신규 생성 중단, `config/service.generationEnabled=false` 로 **재배포 없이 즉시 중지** (이번 추가, 통합 테스트)
 - 함수: `maxInstances: 10`, Claude 호출 240초 제한, 웹 검색 `max_uses` 5
 - 권장: Anthropic Console 월 지출 한도 + Google Cloud 예산 알림
@@ -46,7 +44,5 @@
 
 ## 7. 기타 확인
 - ✅ 이메일 미인증 사용자 생성 불가 (서버 확인)
-- ✅ 회원 탈퇴: 최근 로그인(10분) 요구, 확인 문구, 사진·글·생성 기록 삭제 (Auth 삭제 트리거는 ⚠️ 에뮬레이터 미지원으로 미검증)
-- ⚠️ 저장 글 `photos` 경로는 클라이언트가 임의로 쓸 수 있으나, 읽기는 Storage 규칙(본인 경로)으로 막힘
+- ✅ 회원 탈퇴: 최근 로그인(10분) 요구, 확인 문구, 글·생성 기록 삭제 (Auth 삭제 트리거는 ⚠️ 에뮬레이터 미지원으로 미검증)
 - ⚠️ CSP(Content-Security-Policy) 헤더 미적용 — Firebase·reCAPTCHA·Google Fonts 도메인을 허용하는 정책을 스테이징에서 Report-Only 로 먼저 시험 권장
-- ⚠️ 사진 보관 정책의 경합: 90일 지난 미저장 생성을 삭제하는 순간 그 생성을 저장하면, 저장 글의 사진이 비어 보일 수 있음 (글 내용은 보존, 미리보기는 "보관 기간이 지나 삭제된 사진" 표시). 발생 확률이 매우 낮아 허용

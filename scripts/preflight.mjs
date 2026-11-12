@@ -40,10 +40,9 @@ if (projectId && login.status === 0) {
   check(false, 'Secret 등록 확인', '프로젝트 별칭·로그인 후 다시 실행');
 }
 
-// 5. Storage CORS 파일
-const cors = readFileSync(join(ROOT, 'storage.cors.json'), 'utf8');
-check(!cors.includes('YOUR_PROJECT_ID'), 'storage.cors.json 의 YOUR_PROJECT_ID 교체', 'docs/STAGING_SETUP.md 7단계 (적용: gcloud storage buckets update ... --cors-file=storage.cors.json)');
-if (projectId) check(cors.includes(projectId), `storage.cors.json 에 ${projectId} 도메인 포함`, `"https://${projectId}.web.app" 등 추가 — 스테이징·운영 버킷에 각각 적용`);
+// 5. Cloud Storage 미사용 확인 (사진은 서버에 저장하지 않음)
+const fbcfg = JSON.parse(readFileSync(join(ROOT, 'firebase.json'), 'utf8'));
+check(!fbcfg.storage, 'Cloud Storage 배포 대상 없음 (사진 미저장 정책)', 'firebase.json 에서 storage 항목 제거');
 
 // 6. App Check
 const wenvLocal = readEnv(join(ROOT, `web/.env.${alias}.local`)) || {};
@@ -56,8 +55,7 @@ if (alias === 'prod') check(enforce, '운영은 App Check 강제', 'functions/.e
 if (alias === 'staging') check(fenv && fenv.ACCESS_MODE === 'allowlist', '스테이징은 허용 목록 모드 (초대된 계정만 AI 생성)', 'functions/.env.staging ACCESS_MODE=allowlist');
 
 // 8. 로컬 비밀 파일이 배포 대상에 섞이지 않음
-const fb = JSON.parse(readFileSync(join(ROOT, 'firebase.json'), 'utf8'));
-check(fb.functions[0].ignore.includes('*.local'), 'functions 배포에서 *.local(.secret.local) 제외', 'firebase.json functions.ignore 에 "*.local"');
+check(fbcfg.functions[0].ignore.includes('*.local'), 'functions 배포에서 *.local(.secret.local) 제외', 'firebase.json functions.ignore 에 "*.local"');
 
 console.log(`\n배포 사전 점검: ${alias} (${projectId || '프로젝트 미설정'})\n`);
 for (const r of results) console.log(`${r.ok ? '✅' : '❌'} ${r.label}${r.ok ? '' : `\n     → ${r.hint}`}`);

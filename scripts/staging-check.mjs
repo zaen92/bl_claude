@@ -1,7 +1,7 @@
-// 스테이징 종합 점검 — 배포된 스테이징의 실제 Claude·Firestore·Cloud Storage 로 크레딧·사진·탈퇴 시나리오 확인
+// 스테이징 종합 점검 — 배포된 스테이징의 실제 Claude·Firestore 로 크레딧·사진 분석·사진 미저장·탈퇴 시나리오 확인
 //
 //   에뮬레이터(점검 스크립트 자체 검증, Claude=mock):
-//     npx firebase emulators:exec --project demo-jaeinit --only auth,firestore,functions,storage "node scripts/staging-check.mjs --emulator"
+//     npx firebase emulators:exec --project demo-jaeinit --only auth,firestore,functions "node scripts/staging-check.mjs --emulator"
 //   스테이징 (⚠️ 실제 Claude 호출 3~4회, 약 $0.2~0.5):
 //     gcloud auth application-default login
 //     node scripts/staging-check.mjs --project <스테이징 프로젝트ID> --yes [--photos-dir ./samples]
@@ -29,7 +29,6 @@ if (EMU) {
   projectId = 'demo-jaeinit';
   process.env.FIRESTORE_EMULATOR_HOST ||= '127.0.0.1:8080';
   process.env.FIREBASE_AUTH_EMULATOR_HOST ||= '127.0.0.1:9099';
-  process.env.FIREBASE_STORAGE_EMULATOR_HOST ||= '127.0.0.1:9199';
   webConfig = { apiKey: 'demo-key', projectId, storageBucket: 'demo-jaeinit.appspot.com', authDomain: 'demo-jaeinit.firebaseapp.com', appId: 'demo-app' };
 } else {
   if (!projectId) { console.error('--project <스테이징 프로젝트ID> 또는 --emulator'); process.exit(2); }
@@ -45,14 +44,10 @@ if (EMU) {
 const { initializeApp: adminInit } = fnRequire('firebase-admin/app');
 const { getFirestore } = fnRequire('firebase-admin/firestore');
 const { getAuth } = fnRequire('firebase-admin/auth');
-const { getStorage } = fnRequire('firebase-admin/storage');
-const adminApp = adminInit({ projectId, storageBucket: webConfig.storageBucket }, 'admin');
+const adminApp = adminInit({ projectId }, 'admin');
 const adb = getFirestore(adminApp);
 const aauth = getAuth(adminApp);
-const bucket = getStorage(adminApp).bucket();
 const credits = fnRequire('./src/lib/credits');
-const retention = fnRequire('./src/storage/retention');
-const jobs = fnRequire('./src/storage/deletionJobs');
 const { deleteAccountData } = fnRequire('./src/account/deleteAccount');
 const { png } = fnRequire('./test/fixtures/images');
 
@@ -61,7 +56,6 @@ const { initializeApp, deleteApp } = await import('firebase/app');
 const { getAuth: cAuth, signInWithEmailAndPassword, connectAuthEmulator } = await import('firebase/auth');
 const { getFunctions, httpsCallable, connectFunctionsEmulator } = await import('firebase/functions');
 const { getFirestore: cFs, connectFirestoreEmulator, collection, query, where, getDocs, addDoc, deleteDoc, doc, serverTimestamp } = await import('firebase/firestore');
-const { getStorage: cSt, connectStorageEmulator, ref, getBytes } = await import('firebase/storage');
 
 const runId = Date.now().toString(36);
 const PW = `Pw-${runId}-${Math.random().toString(36).slice(2)}`;
@@ -70,16 +64,15 @@ const log = (ok, msg, extra) => { steps.push({ ok, msg, ...(extra ? { extra } : 
 
 async function clientFor(email, name) {
   const app = initializeApp(webConfig, name);
-  const auth = cAuth(app); const fns = getFunctions(app, REGION); const fs = cFs(app); const st = cSt(app);
+  const auth = cAuth(app); const fns = getFunctions(app, REGION); const fs = cFs(app);
   if (EMU) {
     connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
     connectFunctionsEmulator(fns, '127.0.0.1', 5001);
     connectFirestoreEmulator(fs, '127.0.0.1', 8080);
-    connectStorageEmulator(st, '127.0.0.1', 9199);
   }
   const cred = await signInWithEmailAndPassword(auth, email, PW);
   const call = (n, d) => httpsCallable(fns, n, { timeout: 310_000 })(d).then((r) => r.data);
-  return { app, uid: cred.user.uid, call, fs, st };
+  return { app, uid: cred.user.uid, call, fs };
 }
 
 // 사진: 실제 사진 폴더 또는 1000x750 합성 (서버 검증 한도 이내)
@@ -130,22 +123,22 @@ try {
   assert.ok(Array.isArray(g1.result.hashtags) && g1.result.hashtags.length > 0);
   log(true, '1회 생성(텍스트·웹검색·짧은 글) 성공 → 잔여 1', { title_1: g1.result.title_1, place: g1.result.place_address || '(없음)', mock: g1.mock });
 
-  // 3) 사진 3장 (보통 글) → 0개, 실제 Storage 저장
+  // 3) 사진 3장 (보통 글) → 0개. 사진은 Claude 분석용으로만 전달, 서버에 저장 안 함
   const g2 = await A.call('generatePost', base({ title: '제주 애월 카페 | 오션뷰 디저트 후기', content: '통창 바다뷰, 딸기 케이크와 라떼. 주차 가능.', volume: 'normal', images: photos, clientRequestId: req(2) }));
   generationIds.push(g2.generationId);
-  assert.equal(g2.creditsRemaining, 0); assert.equal(g2.photos.length, photos.length);
+  assert.equal(g2.creditsRemaining, 0); assert.equal(g2.imageCount, photos.length);
   const markers = [1, 2, 3].slice(0, photos.length).filter((i) => g2.result.body.includes(`[사진${i}]`)).length;
-  log(markers === photos.length, `2회 생성(사진 ${photos.length}장·보통 글) 성공 → 잔여 0, 본문 사진 배치 ${markers}/${photos.length}`);
-  const [files] = await bucket.getFiles({ prefix: `users/${A.uid}/generations/${g2.generationId}/` });
-  assert.equal(files.length, photos.length); log(true, `Cloud Storage 에 사진 ${files.length}장 저장`);
-  const [meta] = await files[0].getMetadata();
-  assert.ok(!(meta.metadata && meta.metadata.firebaseStorageDownloadTokens)); log(true, '다운로드 토큰 없음 (토큰 URL 로 우회 열람 불가)');
+  log(markers === photos.length, `2회 생성(사진 ${photos.length}장 분석·보통 글) 성공 → 잔여 0, 본문 사진 배치 ${markers}/${photos.length}`);
 
-  // 4) 사진 접근: 본인 OK, 타인 거부
-  const bytes = await getBytes(ref(A.st, g2.photos[0].path));
-  assert.ok(bytes.byteLength > 0);
-  let denied = false; try { await getBytes(ref(B.st, g2.photos[0].path)); } catch (e) { denied = /unauthorized|permission|403/i.test(e.code + e.message); }
-  assert.ok(denied); log(true, '사진: 본인 인증 다운로드 OK, 다른 회원 거부');
+  // 4) 사진 미저장 확인: 생성 기록·비용 지표·프로필 어디에도 사진·Base64 없음
+  const snippet = photos[0].split(',')[1].slice(100, 160);
+  const saved = JSON.stringify((await adb.doc(`generations/${g2.generationId}`).get()).data())
+    + JSON.stringify((await adb.doc(`generationMetrics/${g2.generationId}`).get()).data())
+    + JSON.stringify((await adb.doc(`users/${A.uid}`).get()).data());
+  assert.ok(!saved.includes(snippet) && !saved.includes('data:image'));
+  const g2doc0 = (await adb.doc(`generations/${g2.generationId}`).get()).data();
+  assert.equal(g2doc0.photos, undefined);
+  log(true, '서버(Firestore)에 사진·Base64 저장 없음, 사진 장수·[사진N] 배치만 기록');
 
   // 5) 세 번째 차단 (차감·AI 호출 없음)
   try { await A.call('generatePost', base({ clientRequestId: req(3) })); assert.fail('차단되어야 함'); } catch (e) { assert.equal(e.details && e.details.reason, 'insufficient_credits', e.message); }
@@ -183,20 +176,19 @@ try {
   let otherDenied = false; try { await B.call('getGenerationStatus', { generationId: g2.generationId }); } catch (e) { otherDenied = e.code === 'functions/not-found'; }
   assert.ok(otherDenied); log(true, `생성 이력 ${hist.size}건 조회·상태 복구, 다른 회원 조회 차단`);
 
-  // 11) 사진 보관 정책 (실제 Storage): 저장 글 → 91일 후에도 유지 / 글 삭제 → 삭제
-  const post = await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: g2.result.title_1, type: '카페', data: g2.result, generationId: g2.generationId, photos: g2.photos, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
-  const t91 = Date.now() + 91 * 86400000;
-  const r1 = await retention.checkGeneration(adb, g2.generationId, t91);
-  assert.equal(r1, 'kept'); log(true, '보관 정책: 저장 글이 있는 사진은 90일이 지나도 유지');
+  // 11) 글 저장(무료): 텍스트 결과·입력값만, 사진 없음 → 다시 열기
+  const before = (await adb.doc(`users/${A.uid}`).get()).data().credits;
+  const post = await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: g2.result.title_1, type: '카페', data: g2.result, generationId: g2.generationId,
+    input: { title: '제주 애월 카페 | 오션뷰 디저트 후기', memo: '', content: '통창 바다뷰', info: '', type: '카페', volume: 'normal', imageCount: photos.length }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  const reopened = await getDocs(query(collection(A.fs, 'posts'), where('uid', '==', A.uid)));
+  const pd = reopened.docs.find((d) => d.id === post.id).data();
+  assert.ok(pd.data.body.includes('[사진1]')); assert.equal(pd.photos, undefined); assert.equal(pd.input.imageCount, photos.length);
+  let rejected = false;
+  try { await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: 'x', data: { body: 'a ' + photos[0] }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }); } catch (e) { rejected = true; }
+  assert.ok(rejected, '본문에 사진 데이터가 섞인 저장은 규칙이 거부');
+  assert.equal((await adb.doc(`users/${A.uid}`).get()).data().credits, before);
+  log(true, '글 저장·다시 열기 무료, [사진N] 배치 유지·사진 데이터 없음, 사진 섞인 저장 거부');
   await deleteDoc(doc(A.fs, 'posts', post.id));
-  const r2 = await retention.checkGeneration(adb, g2.generationId, t91 + 8 * 86400000);
-  assert.equal(r2, 'queued');
-  await jobs.runJob(adb, bucket, `gen_${g2.generationId}`, t91 + 8 * 86400000);
-  const [left] = await bucket.getFiles({ prefix: `users/${A.uid}/generations/${g2.generationId}/` });
-  const g2doc = (await adb.doc(`generations/${g2.generationId}`).get()).data();
-  assert.equal(left.length, 0); assert.equal(g2doc.photosState, 'deleted'); assert.ok(g2doc.result.body);
-  assert.equal((await adb.doc(`users/${A.uid}`).get()).data().storageBytes, 0);
-  log(true, '보관 정책: 글 삭제 후 검사 → 실제 Storage 사진 삭제, 생성 결과 보존, 용량 0');
 
   // 12) 비용 (관리자 전용 지표)
   const metrics = [];
@@ -206,12 +198,12 @@ try {
   const avg = ok.reduce((s, m) => s + (m.costUsd || 0), 0) / (ok.length || 1);
   console.log(`\n성공 ${ok.length}건 평균 예상 비용 $${avg.toFixed(4)} ${EMU ? '(mock — 실제 비용 아님)' : '(정가 기준 — Console Usage 와 대조하세요)'}`);
 
-  // 13) 회원 탈퇴 → 실제 Storage·문서 삭제
+  // 13) 회원 탈퇴 → 문서·계정 삭제
   await A.call('deleteAccount', { confirm: '탈퇴' });
-  const [after] = await bucket.getFiles({ prefix: `users/${A.uid}/` });
-  assert.equal(after.length, 0); assert.equal((await adb.doc(`users/${A.uid}`).get()).exists, false);
+  assert.equal((await adb.doc(`users/${A.uid}`).get()).exists, false);
+  assert.equal((await adb.collection('generations').where('uid', '==', A.uid).get()).size, 0);
   let gone = false; try { await aauth.getUser(A.uid); } catch (e) { gone = e.code === 'auth/user-not-found'; }
-  assert.ok(gone); log(true, '회원 탈퇴 → Auth 계정·사진·글·생성 기록 삭제');
+  assert.ok(gone); log(true, '회원 탈퇴 → Auth 계정·글·생성 기록 삭제');
   userA = null;
 
   mkdirSync(join(ROOT, 'cost-reports'), { recursive: true });
@@ -226,7 +218,7 @@ try {
   // 정리: 테스트 계정·설정 원복
   for (const u of [userA, userB]) {
     if (!u) continue;
-    try { await deleteAccountData(adb, bucket, u.uid, { source: 'staging_check_cleanup' }); await aauth.deleteUser(u.uid); } catch (e) { /* 이미 삭제됨 */ }
+    try { await deleteAccountData(adb, u.uid, { source: 'staging_check_cleanup' }); await aauth.deleteUser(u.uid); } catch (e) { /* 이미 삭제됨 */ }
   }
   if (configTouched) {
     const cfgRef = adb.doc('config/service');

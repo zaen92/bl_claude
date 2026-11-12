@@ -24,10 +24,11 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   const p = await ctx.newPage();
   const errs = [];
   const bodies = [];
+  const reqs = [];
   p.on('pageerror', (e) => errs.push('pageerror ' + e.message));
   p.on('console', (m) => { if (m.type() === 'error' && !/net::ERR_INTERNET_DISCONNECTED|Failed to fetch|ERR_NETWORK|Could not reach Cloud Firestore|WebChannelConnection/.test(m.text())) errs.push('console ' + m.text()); });
   p.on('dialog', async (d) => { await d.accept(d.type() === 'prompt' ? '탈퇴' : undefined); });
-  p.on('request', (r) => { const pd = r.postData(); if (pd) bodies.push(pd); });
+  p.on('request', (r) => { const pd = r.postData(); reqs.push({ url: r.url(), body: pd || '' }); if (pd) bodies.push(pd); });
   const credits = async () => p.textContent('#stxStatus');
   const historyCount = () => p.locator('#historyList > div').count();
 
@@ -153,23 +154,62 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   assert.equal(await credits(), '크레딧 1개');
   log('응답 유실(네트워크 끊김) → 서버 기록으로 결과 복구, 중복 차감 없음 (크레딧 1개)');
 
-  // ── ⑦ 새로고침 후 저장 글·사진 다시 불러오기 ──
+  // ── ⑦ 새로고침 후 저장 글 다시 열기: [사진N] 배치만, 실제 사진은 표시 안 함 → 다시 첨부하면 표시 ──
   await p.reload();
   await p.waitForFunction(() => document.getElementById('savedCount').textContent === '1');
   await p.click('#tabSaved');
-  assert.match(await p.textContent('#savedList'), /📸 3장/);
+  assert.match(await p.textContent('#savedList'), /사진 3장 배치/);
   await p.click('#savedList >> text=📄 불러오기');
   await p.waitForSelector('#rb3.on');
   await p.click('#tabPreview');
-  await p.waitForFunction(() => document.querySelectorAll('.pp-img img').length === 3, null, { timeout: 10000 }).catch(async (e) => {
-    console.log('DEBUG', (await p.innerHTML('#previewArea')).slice(0, 600), errs); throw e;
-  });
-  const srcs = await p.$$eval('.pp-img img', (els) => els.map((e) => e.src));
-  assert.ok(srcs.every((s) => s.startsWith('blob:')), '토큰 URL 이 아닌 인증된 getBlob 사용: ' + srcs[0]);
-  const loaded = await p.$$eval('.pp-img img', (els) => els.every((e) => e.complete && e.naturalWidth > 0));
-  assert.ok(loaded, '이미지 로드');
-  await p.screenshot({ path: OUT + '/4-saved-reload-photos.png' });
-  log('새로고침 후 저장 글 불러오기 → Storage 사진 3장 표시 (getBlob, 다운로드 토큰 URL 없음)');
+  assert.equal(await p.locator('.pp-img img').count(), 0, '저장 글에는 사진 없음');
+  assert.equal(await p.locator('.pp-img-empty').count(), 3, '[사진1~3] 자리 표시');
+  await p.screenshot({ path: OUT + '/4-saved-reopen-no-photos.png' });
+  await p.setInputFiles('#fi', [0, 1].map((i) => ({ name: `re${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(JPEGS[0], 'base64') })));
+  await p.waitForFunction(() => document.querySelectorAll('.pi').length === 2);
+  await p.click('#tabResult'); await p.click('#tabPreview');
+  assert.equal(await p.locator('.pp-img img').count(), 2, '다시 첨부한 사진이 [사진1][사진2] 에 표시');
+  assert.equal(await p.locator('.pp-img-empty').count(), 1);
+  log('저장 글 다시 열기 → 사진 배치 자리만 표시, 사진을 다시 첨부하면 미리보기에 표시');
+
+  // ── ⑧ JSON 내보내기 (무료, 사진·민감정보 없음) ──
+  const creditsBefore = await credits();
+  await p.click('#tabResult');
+  const [dl] = await Promise.all([p.waitForEvent('download'), p.click('#exportBtn')]);
+  const jsonPath = OUT + '/export.json';
+  await dl.saveAs(jsonPath);
+  const exported = fs.readFileSync(jsonPath, 'utf8');
+  const ej = JSON.parse(exported);
+  assert.match(dl.suggestedFilename(), /^jaeinit_.+\.json$/);
+  assert.equal(ej.format, 'jaeinit-blog-studio');
+  for (const k of ['title_1', 'title_2', 'title_3', 'keyword_main', 'body', 'reel', 'thumbnail']) assert.ok(ej.result[k], k);
+  assert.ok(ej.result.hashtags.length && ej.photoLayout.count === 3 && ej.input.imageCount === 3);
+  assert.equal(ej.input.title, '세비야 타파스 맛집 바 알팔파');
+  assert.ok(!/data:image|\/9j\/|sk-ant|idToken|credits|admin|"uid"/.test(exported), '사진·키·토큰·크레딧·권한·uid 없음');
+  assert.equal(await credits(), creditsBefore, '내보내기 무료');
+  log('JSON 내보내기: 입력·결과·사진 배치만, 사진/Base64·민감정보 없음, 크레딧 그대로');
+
+  // ── ⑨ JSON 불러오기: 입력값·결과 복원, 사진은 복원 안 함 ──
+  await p.click('#tabResult');
+  await p.click('text=🔄 새로 작성');
+  assert.equal(await p.inputValue('#ti'), '');
+  await p.setInputFiles('#jsonFile', jsonPath);
+  await p.waitForSelector('#rb3.on');
+  assert.equal(await p.inputValue('#ti'), '세비야 타파스 맛집 바 알팔파');
+  assert.equal(await p.inputValue('#ci'), '살모레호 맛있음, 웨이팅 20분');
+  assert.equal(await p.textContent('.tb.on'), '🍜맛집');
+  assert.match(await p.textContent('.vb.on'), /보통/);
+  assert.equal(await p.textContent('.tc-x >> nth=0'), ej.result.title_1);
+  assert.equal(await p.locator('.pi').count(), 0, '사진은 복원하지 않음');
+  await p.click('#tabPreview');
+  assert.equal(await p.locator('.pp-img-empty').count(), 3);
+  assert.equal(await credits(), creditsBefore, '불러오기 무료');
+  // 예전 v3 저장 글 형식도 불러오기
+  const legacyPath = OUT + '/legacy.json';
+  fs.writeFileSync(legacyPath, JSON.stringify([{ id: 1, title: '예전 글', type: '카페', date: '2024. 1. 1.', data: { title_1: '예전 제목', body: '예전 본문', hashtags: ['#예전'] } }]));
+  await p.setInputFiles('#jsonFile', legacyPath);
+  await p.waitForFunction(() => document.querySelector('.tc-x') && document.querySelector('.tc-x').textContent === '예전 제목');
+  log('JSON 불러오기: 입력값·생성 결과 복원, 사진은 복원 안 함(배치 자리만), 예전 형식 호환, 무료');
 
   // ── 생성 이력 ──
   await p.click('#tabHistory');
@@ -191,8 +231,16 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   assert.ok(!/sk-ant-|api\.anthropic\.com|openapi\.naver\.com/.test(html));
   log('브라우저 요청·페이지에 API 키/외부 AI 엔드포인트 없음');
 
-  assert.ok(!bodies.concat(await p.evaluate(() => performance.getEntriesByType('resource').map((e) => e.name))).some((u) => /[?&]token=/.test(u)), '다운로드 토큰 URL 미사용');
-  log('Storage 다운로드 토큰 URL 요청 없음');
+  // ── 사진 미저장: Storage 요청 없음, Firestore 쓰기에 사진 데이터 없음 ──
+  assert.ok(!reqs.some((r) => /:9199|firebasestorage\.googleapis\.com/.test(r.url)), 'Cloud Storage 요청 없음');
+  const snippet = JPEGS[0].slice(10, 60);
+  const fsWrites = reqs.filter((r) => /:8080|firestore\.googleapis\.com/.test(r.url));
+  assert.ok(fsWrites.length > 0 && !fsWrites.some((r) => r.body.includes(snippet) || r.body.includes('data:image')), 'Firestore 쓰기에 사진 없음');
+  const genDocs = await db.collection('generations').where('uid', '==', userUid).get();
+  const postDocs = await db.collection('posts').where('uid', '==', userUid).get();
+  const stored = JSON.stringify(genDocs.docs.map((d) => d.data())) + JSON.stringify(postDocs.docs.map((d) => d.data()));
+  assert.ok(!stored.includes(snippet) && !stored.includes('data:image') && !/"photos"/.test(stored), '서버 문서에 사진 없음');
+  log('사진 미저장: Storage 요청 없음, Firestore 생성 기록·저장 글에 사진·Base64 없음');
 
   // ── 회원 탈퇴 ──
   await p.click('#stx');
@@ -201,9 +249,8 @@ const JPEGS = ['/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////
   const relogin = await fetch(`${AUTH}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo-key`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: 'pw123456', returnSecureToken: true }) });
   assert.equal(relogin.status, 400);
   assert.equal((await db.collection('posts').where('uid', '==', userUid).get()).size, 0);
-  const left = await (await fetch(`http://127.0.0.1:9199/v0/b/demo-jaeinit.appspot.com/o?prefix=${encodeURIComponent('users/' + userUid + '/')}`, { headers: { Authorization: 'Bearer owner' } })).json();
-  assert.equal((left.items || []).length, 0);
-  log('회원 탈퇴 → 계정·글·사진 삭제, 재로그인 불가');
+  assert.equal((await db.collection('generations').where('uid', '==', userUid).get()).size, 0);
+  log('회원 탈퇴 → 계정·글·생성 기록 삭제, 재로그인 불가');
 
   assert.deepEqual(errs, []);
   log('콘솔 오류 없음');

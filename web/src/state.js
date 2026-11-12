@@ -4,8 +4,8 @@ export const state = {
   sV: '',          // 분량
   imgs: [],        // 압축된 이미지 dataURL (메모리에만 유지 — 기존과 동일)
   resultData: null, // 현재 표시 중인 생성 결과
-  resultMeta: null, // { generationId, type, photos:[{path,index}] }
-  previewPhotos: null, // 미리보기용 사진 (생성 시점 사진 또는 Storage URL)
+  resultMeta: null, // { generationId, type, input:{title,memo,content,info,type,volume,imageCount}, createdAt }
+  previewPhotos: null, // 생성 직후 미리보기용 사진 (브라우저 메모리에만, 서버·JSON 저장 안 함). null 이면 현재 첨부 사진 사용
   inFlight: false,     // 생성 요청 진행 중 (더블클릭 방지)
   currentRequestId: null, // 결과가 확정되기 전까지 같은 멱등 키 재사용
   generations: [],     // 생성 이력

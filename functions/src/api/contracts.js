@@ -44,7 +44,7 @@
  * @property {'processing'|'succeeded'|'failed'} status
  * @property {GenerationResult|null} result
  * @property {PlaceInfo|null} naver
- * @property {{path:string,index:number}[]} photos   Storage 경로 (본인만 읽기)
+ * @property {number} imageCount        첨부했던 사진 장수 (사진 자체는 저장·반환하지 않음, 본문 [사진N] 배치만)
  * @property {{reason:string,message:string,retryable:boolean}|null} error
  * @property {boolean} refunded           실패 시 크레딧 복구 여부
  * @property {boolean} mock               에뮬레이터 mock AI 결과 여부
@@ -53,9 +53,9 @@
  *   duplicate=true: 같은 clientRequestId 의 기존 결과(추가 차감 없음)
  *
  * 실패 시 HttpsError.details: { reason, generationId?, refunded?, retryable?, creditsRemaining?, retryAfterSec? }
- *   reason: insufficient_credits | rate_limited | daily_limit | too_many_concurrent | storage_quota | email_not_verified
+ *   reason: insufficient_credits | rate_limited | daily_limit | too_many_concurrent | email_not_verified | service_paused | daily_budget_exceeded | not_allowlisted
  *         | ai_not_configured | ai_timeout | ai_network | ai_rate_limited | ai_unavailable | ai_config | ai_billing
- *         | ai_bad_request | ai_refusal | ai_empty_result | ai_incomplete | storage_failed | internal
+ *         | ai_bad_request | ai_refusal | ai_empty_result | ai_incomplete | internal
  *
  * 스트리밍 청크(StreamChunk): { type:'status', message:string, generationId?:string } | { type:'text', delta:string }
  *

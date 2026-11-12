@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('비로그인: 모든 callable 이 unauthenticated', async () => {
-  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits', 'deleteAccount', 'adminCheckAiConfig', 'adminRetryDeletionJob']) {
+  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits', 'deleteAccount', 'adminCheckAiConfig']) {
     const r = await call(name, {});
     assert.equal(r.status, 401, name);
     assert.equal(r.body.error.status, 'UNAUTHENTICATED', name);
@@ -86,7 +86,8 @@ test('generatePost(에뮬레이터 mock AI): 2회 성공 → 3회째 차단, 상
   const r1 = await call('generatePost', GOOD('req_gen_00001'), u.idToken);
   assert.equal(r1.status, 200, JSON.stringify(r1.body));
   const g1 = r1.body.result;
-  assert.deepEqual([g1.status, g1.mock, g1.creditsRemaining, g1.photos.length], ['succeeded', true, 1, 2]);
+  assert.deepEqual([g1.status, g1.mock, g1.creditsRemaining, g1.imageCount], ['succeeded', true, 1, 2]);
+  assert.ok(!JSON.stringify(r1.body).includes('/9j/'), '응답에 사진 데이터 없음');
   assert.ok(g1.result.body.includes('[사진1]') && g1.result.body.includes('[사진2]'));
   assert.ok(!JSON.stringify(r1.body).match(/sk-ant|x-api-key|ANTHROPIC/i));
 
@@ -188,6 +189,5 @@ test('deleteAccount: 확인 문구 필요 → 데이터·Auth 계정 삭제, 다
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'bye@x.com', password: 'pw123456', returnSecureToken: true }),
   });
   assert.equal(login.status, 400);
-  const st = await fetch(`http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST || '127.0.0.1:9199'}/v0/b/demo-jaeinit.appspot.com/o?prefix=${encodeURIComponent(`users/${u.uid}/`)}`, { headers: { Authorization: 'Bearer owner' } });
-  assert.equal(((await st.json()).items || []).length, 0);
+  assert.equal((await fetch(`${FS}/v1/projects/${PROJECT}/databases/(default)/documents/users/${u.uid}`, { headers: { Authorization: 'Bearer owner' } })).status, 404);
 });

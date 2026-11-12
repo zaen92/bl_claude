@@ -12,11 +12,9 @@
 | `generatePost` | ✅ **STEP 2 — 실제 Claude 호출 + 크레딧 차감/복구** | 로그인 + 이메일 인증 |
 | `getGenerationStatus` | ✅ STEP 2 | 로그인 (본인 기록만) |
 | `sweepStaleGenerations` | ✅ STEP 2 (5분 주기 스케줄) | 시스템 |
-| `photoRetentionDaily` · `processPhotoDeletionJobs` | ✅ STEP 2.5 (매일 04:10 / 10분 주기) | 시스템 |
 | `deleteAccount` | ✅ STEP 2.5 회원 탈퇴 | 로그인 + 최근 10분 내 로그인 |
 | `onAuthUserDeleted` | ✅ STEP 2.5 (Auth 삭제 트리거, 데이터 정리) | 시스템 |
 | `adminCheckAiConfig` | ✅ STEP 2.5 키·모델·웹검색 점검 (생성 비용 없음, 키 값 미반환) | admin |
-| `adminRetryDeletionJob` | ✅ STEP 2.5 실패한 사진 삭제 작업 재시도 | admin |
 | `createOrder` / `confirmPayment` / `tossWebhook` | ⬜ STEP 3 (인터페이스만) | |
 
 ---
@@ -31,17 +29,17 @@
 |---|---|
 | 제목 / 내용 / 메모·장소 | 1~200자 / 1~5,000자 / ≤2,000자 |
 | 유형 · 분량 | 9종 · short/normal/long |
-| 사진 | 최대 10장, JPEG/PNG/WebP dataURL, 장당 ≤약 1.5MB, 합계 ≤약 9MB (클라이언트가 1400px·JPEG 82%로 압축) |
+| 사진 | 최대 10장, JPEG/PNG/WebP dataURL, 장당 ≤약 1.5MB, 합계 ≤약 9MB (클라이언트가 1400px·JPEG 82%로 압축) — **Claude 분석용으로만 전달, 서버에 저장하지 않음** |
 | clientRequestId | `[A-Za-z0-9_-]{8,64}` — 멱등 키 |
 
 ### 처리 순서 (`functions/src/generation/service.js`)
 1. 인증 + 이메일 인증 확인 (토큰 → 필요 시 Admin Auth 재확인), 입력 검증, API 키 설정 확인(없으면 **차감 전** 거부), 서비스 게이트(일시중지·일일 비용 상한, 차감 전)
 2. **예약 트랜잭션**: `generations/{uid}_{clientRequestId}` 가 있으면 그 상태를 반환(중복 실행·차감 없음). 없으면
    잔액 ≥1 · 동시 실행 < 상한 · 분당/일일 한도 · 저장 용량 확인 → `credits −1`(무료 우선), `creditLedger/gen_{id}`, `generations`(processing, lease 6분) 생성
-3. 사진 → Storage 저장 · 네이버 지역검색(키 설정 시) · Claude 호출(스트리밍, 웹 검색 도구, `pause_turn` 이어쓰기, 240초 제한)
+3. 네이버 지역검색(키 설정 시) · Claude 호출(사진은 요청 본문으로만 전달, 스트리밍, 웹 검색 도구, `pause_turn` 이어쓰기, 240초 제한)
 4. 결과 파싱(기존 JSON 추출 + recover) → 본문이 비면 실패 처리
-5. **확정 트랜잭션**: `succeeded`, `charge.status=captured`, 사진 보관 만료일(90일), `generationMetrics`·`opsDaily` 에 토큰·비용·품질 기록
-6. **실패 시 복구 트랜잭션** (status==processing 일 때만 → 이중 환급 불가): `creditLedger/refund_{id}` +1 (차감했던 버킷으로), `failed`, 부분 사용량 기록 → 사진 삭제(실패 시 삭제 작업 등록)·용량 반환
+5. **확정 트랜잭션**: `succeeded`, `charge.status=captured`, `generationMetrics`·`opsDaily` 에 토큰·비용·품질 기록
+6. **실패 시 복구 트랜잭션** (status==processing 일 때만 → 이중 환급 불가): `creditLedger/refund_{id}` +1 (차감했던 버킷으로), `failed`, 부분 사용량 기록
 7. 함수가 3~6 전에 죽으면: lease 만료 후 `getGenerationStatus` 조회 시 또는 5분 주기 스케줄러가 6 을 실행
 
 스트리밍 청크: `{type:'status', message}` | `{type:'text', delta}` → 기존 "실시간 작성 중" 박스
@@ -49,7 +47,7 @@
 응답 (`GeneratePostResponse`)
 ```json
 { "generationId": "uid_req_...", "status": "succeeded", "result": { /* GenerationResult */ },
-  "naver": null, "photos": [{"path": "users/.../photo_1.jpg", "index": 1}], "error": null, "refunded": false,
+  "naver": null, "imageCount": 3, "error": null, "refunded": false,
   "mock": false, "creditsRemaining": 1, "usage": {"inputTokens": 12000, "outputTokens": 3500} }
 ```
 
@@ -61,14 +59,13 @@
 | rate_limited (`retryAfterSec`) | resource-exhausted | 차감 안 함 | N초 후 다시 |
 | daily_limit | resource-exhausted | 차감 안 함 | 오늘 한도 소진 |
 | too_many_concurrent | resource-exhausted | 차감 안 함 | 생성 중인 글 있음 |
-| storage_quota | resource-exhausted | 차감 안 함 | 사진 저장 공간 부족 |
 | ai_not_configured | failed-precondition | 차감 안 함 | 관리자 문의 |
 | service_paused | unavailable | 차감 안 함 | `config/service.pauseMessage` |
 | not_allowlisted | permission-denied | 차감 안 함 | 테스트 기간 초대 계정만 |
 | daily_budget_exceeded | unavailable | 차감 안 함 | 오늘 이용량 많음 |
 | ai_timeout · ai_network · ai_rate_limited · ai_unavailable · internal | unavailable | **복구됨** | 재시도 가능 |
 | ai_config · ai_billing · ai_bad_request · ai_refusal | failed-precondition | **복구됨** | 재시도 불가/입력 수정 |
-| ai_empty_result · ai_incomplete · storage_failed | unavailable | **복구됨** | 재시도 가능 |
+| ai_empty_result · ai_incomplete | unavailable | **복구됨** | 재시도 가능 |
 
 실패 details: `{ reason, generationId, refunded: true, retryable, creditsRemaining }`
 
@@ -95,7 +92,6 @@
 | RATE_LIMIT_PER_MINUTE | 3 | 사용자별 분당 생성 요청 |
 | DAILY_GENERATION_LIMIT | 20 | 사용자별 일일(KST) 생성 요청 (실패 포함) |
 | MAX_CONCURRENT_GENERATIONS | 2 | 사용자별 동시 생성 |
-| STORAGE_QUOTA_MB | 200 | 사용자별 사진 보관 용량 |
 | ACCESS_MODE | open | `allowlist` 면 `config/service.allowedEmails` 와 관리자만 생성 (스테이징 기본값). 설정이 없으면 관리자만 |
 | DAILY_COST_LIMIT_USD | 30 | 서비스 전체 하루 AI 예상 비용 상한 (0=끔). `config/service.dailyCostLimitUsd` 가 있으면 우선 |
 | ENFORCE_APP_CHECK | false | 운영 배포 전 true |
@@ -125,3 +121,6 @@ npx firebase functions:secrets:set NAVER_CLIENT_SECRET
 
 ## createOrder / confirmPayment / tossWebhook ⬜ (STEP 3)
 STEP 1 설계 유지: 서버가 `creditPackages` 금액으로 주문 생성 → 토스 승인 API(`TOSS_SECRET_KEY`, `Idempotency-Key: orderId`) → 트랜잭션으로 `paidCredits += credits`, `creditLedger/purchase_{orderId}` (bucket `paid`).
+
+## 크레딧이 드는 작업
+새로운 AI 생성(`generatePost`)만 1크레딧입니다. 저장·저장 글 확인·생성 이력·JSON 내보내기/불러오기·사진 미리보기는 서버 호출이 없거나 무료입니다 ([PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md) 4절).

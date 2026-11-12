@@ -53,7 +53,6 @@ function summarize(rows) {
     // 실패 호출 비용을 성공 1건당으로 환산 (크레딧은 복구되므로 회사 부담)
     failureOverheadPerSuccessUsd: r6(ok.length ? failedCost / ok.length : 0),
     computeUsdPerSuccess: r6(ok.length ? rows.reduce((s, r) => s + (r.computeUsdEst || 0), 0) / ok.length : 0),
-    avgPhotoBytesPerSuccess: Math.round(ok.length ? ok.reduce((s, r) => s + (r.photoBytes || 0), 0) / ok.length : 0),
     aiCostUsd: r6(okCost),
   };
 }
@@ -61,7 +60,7 @@ function summarize(rows) {
 /**
  * 크레딧 상품 손익.
  * @param {object} o
- * @param {number} o.costPerGenUsd   생성 1회 원가 (AI 평균 + 실패 부담 + 서버 + 저장)
+ * @param {number} o.costPerGenUsd   생성 1회 원가 (AI 평균 + 실패 부담 + 서버)
  * @param {number} [o.costPerGenWorstUsd]  최악(p95 등) 원가
  * @param {{credits:number, priceKrw?:number}[]} o.packages
  * @param {number} o.usdKrw          환율

@@ -3,7 +3,6 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, connectAuthEmulator } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 import { getFunctions, connectFunctionsEmulator } from 'firebase/functions';
-import { getStorage, connectStorageEmulator } from 'firebase/storage';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 
 export const REGION = 'asia-northeast3';
@@ -44,12 +43,10 @@ if (siteKey) {
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const functions = getFunctions(app, REGION);
-export const storage = getStorage(app);
 
 if (USE_EMULATORS) {
   const host = location.hostname || '127.0.0.1';
   connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true });
   connectFirestoreEmulator(db, host, 8080);
   connectFunctionsEmulator(functions, host, 5001);
-  connectStorageEmulator(storage, host, 9199);
 }

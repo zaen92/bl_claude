@@ -60,14 +60,31 @@ service cloud.firestore {
     }
 
     // ── posts/{postId} : 사용자가 저장한 글 ───────────────
+    // 저장 글의 입력값: 텍스트만 (사진·Base64 불가)
+    function validInput(i) {
+      return i.keys().hasOnly(['title', 'memo', 'content', 'info', 'type', 'volume', 'imageCount'])
+        && (!('title' in i) || i.title is string && i.title.size() <= 200)
+        && (!('memo' in i) || i.memo is string && i.memo.size() <= 2000)
+        && (!('content' in i) || i.content is string && i.content.size() <= 5000)
+        && (!('info' in i) || i.info is string && i.info.size() <= 2000)
+        && (!('type' in i) || i.type is string && i.type.size() <= 20)
+        && (!('volume' in i) || i.volume in ['short', 'normal', 'long'])
+        && (!('imageCount' in i) || i.imageCount is int && i.imageCount >= 0 && i.imageCount <= 10);
+    }
+    // 본문 등에 사진 dataURL(Base64)이 섞여 들어오는 것을 차단
+    function noImageData(d) {
+      return !(d.data.get('body', '') is string && d.data.get('body', '').matches('(?s).*data:image/.*'));
+    }
     function validPost(d) {
-      return d.keys().hasOnly(['uid', 'title', 'type', 'data', 'photos', 'generationId', 'legacyId', 'legacySavedAt', 'createdAt', 'updatedAt'])
+      // 사진은 저장하지 않는다 — data.body 의 [사진N] 배치 정보와 input.imageCount 만
+      return d.keys().hasOnly(['uid', 'title', 'type', 'data', 'input', 'generationId', 'legacyId', 'legacySavedAt', 'createdAt', 'updatedAt'])
         && d.keys().hasAll(['uid', 'title', 'data', 'createdAt', 'updatedAt'])
         && d.uid == request.auth.uid
         && d.title is string && d.title.size() <= 300
         && (!('type' in d) || d.type is string && d.type.size() <= 20)
         && d.data is map
-        && (!('photos' in d) || d.photos is list && d.photos.size() <= 10)
+        && (!('input' in d) || d.input is map && validInput(d.input))
+        && noImageData(d)
         && (!('generationId' in d) || d.generationId == null || d.generationId is string)
         && (!('legacyId' in d) || d.legacyId is int || d.legacyId is string)
         && d.updatedAt == request.time;
@@ -86,10 +103,9 @@ service cloud.firestore {
 
     // ── 운영 데이터 (서버 전용 쓰기, 관리자만 읽기) ──────────────
     // generationMetrics: 생성별 토큰·비용·품질 / opsDaily: 일별 합계
-    // photoDeletionJobs: 사진 삭제 작업 / accountDeletions: 탈퇴 처리 기록
+    // accountDeletions: 탈퇴 처리 기록
     match /generationMetrics/{id} { allow read: if isAdmin(); allow write: if false; }
     match /opsDaily/{day} { allow read: if isAdmin(); allow write: if false; }
-    match /photoDeletionJobs/{id} { allow read: if isAdmin(); allow write: if false; }
     match /accountDeletions/{uid} { allow read: if isAdmin(); allow write: if false; }
 
     // ── config/service : 생성 일시중지·일일 비용 상한 (관리자만) ──

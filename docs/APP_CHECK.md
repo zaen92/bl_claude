@@ -16,7 +16,7 @@ App Check 는 "우리 웹앱에서 온 요청인지"를 확인해, 탈취된 ID 
    ```
 4. 배포 후 Firebase 콘솔 App Check → **Cloud Functions** 지표에서 "확인된 요청" 비율이 충분히 높은지 1~2일 관찰 (이 단계에서는 아직 강제 안 함)
 5. `functions/.env` 에서 `ENFORCE_APP_CHECK=true` → `npx firebase deploy --only functions`
-6. (선택) Firestore·Storage 도 App Check 탭에서 "적용" — 웹 SDK 가 토큰을 자동 첨부
+6. (선택) Firestore 도 App Check 탭에서 "적용" — 웹 SDK 가 토큰을 자동 첨부
 
 ## 개발 환경에서 App Check 켜고 테스트
 1. Firebase 콘솔 → App Check → 앱 메뉴 → **디버그 토큰 관리** → 토큰 추가 (UUID)
@@ -37,7 +37,7 @@ App Check 는 "우리 웹앱에서 온 요청인지"를 확인해, 탈취된 ID 
 - [ ] 디버그 토큰은 개발 기기에만, 운영 빌드에 `VITE_APPCHECK_DEBUG_TOKEN` 이 없는지 확인
 - [ ] `functions/.env` `ENFORCE_APP_CHECK=true` → `npx firebase deploy --only functions`
 - [ ] 강제 후: 디버그 토큰 없는 스크립트에서 callable 호출 시 거부되는지 확인
-- [ ] (선택) Firestore·Storage 도 App Check 적용
+- [ ] (선택) Firestore 도 App Check 적용
 - [ ] 관리자 계정으로 앱 → 내 계정 → "🛠 AI 설정 점검" 에서 `App Check 강제 ✅` 표시 확인
 
 ## 주의

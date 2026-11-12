@@ -4,9 +4,10 @@
  *
  *   ⓪ gate      서비스 일시중지 / 일일 AI 비용 상한 확인 (config/service, opsDaily) — 차감 전
  *   ① reserve   트랜잭션: 잔액·속도·일일·동시실행·용량 확인 → 1크레딧 차감(원장 gen_{id}) + generations(processing)
- *   ② run       사진 Storage 저장 → 네이버 검색 → Claude 호출(스트리밍) → 결과 파싱
- *   ③ finalize  트랜잭션: generations succeeded, 차감 확정, 사진 보관 만료일, 비용 기록(generationMetrics, opsDaily)
- *   ③' refund   실패 시 트랜잭션: 원장 refund_{id} +1, generations failed, 비용 기록 → 사진 삭제(실패 시 삭제 작업 등록)
+ *   ② run       네이버 검색 → Claude 호출(스트리밍, 사진은 요청 본문으로만 전달) → 결과 파싱
+ *               ※ 사진은 서버에 저장하지 않는다 (Storage·Firestore 모두). 결과 본문의 [사진N] 배치 정보만 남는다.
+ *   ③ finalize  트랜잭션: generations succeeded, 차감 확정, 비용 기록(generationMetrics, opsDaily)
+ *   ③' refund   실패 시 트랜잭션: 원장 refund_{id} +1, generations failed, 비용 기록
  *   ④ recover   함수가 죽어 processing 으로 남은 건은 lease 만료 후 refund (조회 시 / 5분 주기 스케줄러)
  *
  * 이중 환급 방지: refund 는 트랜잭션 안에서 status==processing 일 때만 실행하고, 원장 ID refund_{id} 를 create() 로 기록.
@@ -14,15 +15,14 @@
  * 잔액 불변식: users.credits == freeCredits + paidCredits == Σ creditLedger.delta (uid)
  */
 const { FieldValue, Timestamp } = require('firebase-admin/firestore');
-const { COL, LEDGER_TYPE, GENERATION_STATUS, GENERATION_COST, BUCKET, PHOTO_STATE, PHOTO_RETENTION_DAYS } = require('../lib/schema');
+const { COL, LEDGER_TYPE, GENERATION_STATUS, GENERATION_COST, BUCKET } = require('../lib/schema');
 const { writeLedgerInTx, bucketsOf, CreditError } = require('../lib/credits');
 const { buildPrompt, mergePlaceInfo } = require('../ai/prompt');
 const { parseGeneration } = require('../ai/parse');
 const { checkResult } = require('../ai/validateResult');
 const { buildClaudeRequest, runClaude, classifyAiError, AiError } = require('../ai/claude');
 const { estimateCostUsd, estimateComputeUsd } = require('../config/pricing');
-const { savePhotos, deletePhotos, totalImageBytes } = require('../storage/photos');
-const jobs = require('../storage/deletionJobs');
+const { totalImageBytes } = require('../api/images');
 
 /** 사용자에게 보여줄 실패 메시지 (내부 정보·원문 오류는 노출하지 않음) */
 const USER_MESSAGE = {
@@ -36,12 +36,10 @@ const USER_MESSAGE = {
   ai_refusal: '이 내용으로는 글을 생성할 수 없어요. 내용을 수정해주세요.',
   ai_empty_result: 'AI가 올바른 결과를 만들지 못했어요.',
   ai_incomplete: 'AI 응답이 완료되지 않았어요.',
-  storage_failed: '사진 저장에 실패했어요.',
   timeout_recovered: '생성이 제시간에 끝나지 않았어요.',
   internal: '알 수 없는 오류가 발생했어요.',
 };
 
-const DAY_MS = 24 * 3600 * 1000;
 const KST_OFFSET_MS = 9 * 3600 * 1000;
 const kstDay = (ms) => new Date(ms + KST_OFFSET_MS).toISOString().slice(0, 10);
 
@@ -56,7 +54,7 @@ function publicView(id, g) {
     status: g.status,
     result: g.result || null,
     naver: g.naver || null,
-    photos: (g.photos || []).map((p) => ({ path: p.path, index: p.index })),
+    imageCount: (g.input && g.input.imageCount) || 0,
     error: g.error ? { reason: g.error.reason, message: g.error.message, retryable: !!g.error.retryable } : null,
     refunded: !!(g.charge && g.charge.status === 'refunded'),
     mock: g.provider === 'mock',
@@ -97,7 +95,7 @@ async function checkServiceGate(db, cfg, nowMs, { cacheMs = 30_000, caller = nul
 function resetGateCache() { gateCache = { at: 0, value: null }; }
 
 /** generationMetrics + opsDaily 기록 (트랜잭션 안) */
-function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReason, photoBytes, qualityFlags, nowMs }) {
+function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReason, qualityFlags, nowMs }) {
   const model = (aiMeta && aiMeta.model) || g.model;
   const usage = (aiMeta && aiMeta.usage) || null;
   const cost = usage ? estimateCostUsd(model, usage) : { usd: null, known: false, breakdown: null };
@@ -117,7 +115,7 @@ function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReas
     type: g.input.type,
     volume: g.input.volume,
     imageCount: g.input.imageCount,
-    photoBytes: photoBytes || 0,
+    imageBytesSent: g.imageBytesSent || 0, // Claude 로 보낸 사진 크기(요청 본문, 저장 안 함)
     usage,
     costUsd: cost.usd,
     costKnown: cost.known,
@@ -144,7 +142,6 @@ function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReas
     outputTokens: inc(usage && usage.outputTokens),
     webSearchRequests: inc(usage && usage.webSearchRequests),
     computeUsdEst: inc(computeUsdEst),
-    photoBytesAdded: inc(ok ? photoBytes : 0),
     byModel: { [model.replace(/\./g, '_')]: { count: inc(1), costUsd: inc(cost.usd) } },
     updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
@@ -154,7 +151,7 @@ function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReas
  * ① 예약: 1크레딧 차감 + generations 생성 (원자적)
  * @returns {Promise<{reserved:boolean, existing?:object}>}
  */
-async function reserve(db, { uid, generationId, input, imageBytes, cfg, provider, nowMs }) {
+async function reserve(db, { uid, generationId, input, imageBytes = 0, cfg, provider, nowMs }) {
   const userRef = db.collection(COL.USERS).doc(uid);
   const genRef = db.collection(COL.GENERATIONS).doc(generationId);
   return db.runTransaction(async (tx) => {
@@ -181,9 +178,6 @@ async function reserve(db, { uid, generationId, input, imageBytes, cfg, provider
     if (dayCount >= cfg.dailyLimit) {
       throw new CreditError('resource-exhausted', `오늘 생성 한도(${cfg.dailyLimit}회)를 모두 사용했어요. 내일 다시 이용해주세요.`, { reason: 'daily_limit' });
     }
-    if ((u.storageBytes || 0) + imageBytes > cfg.storageQuotaBytes) {
-      throw new CreditError('resource-exhausted', '사진 저장 공간이 부족해요. 사진 수를 줄여주세요.', { reason: 'storage_quota' });
-    }
 
     const ledgerId = `gen_${generationId}`;
     const r = writeLedgerInTx(tx, db, {
@@ -200,7 +194,6 @@ async function reserve(db, { uid, generationId, input, imageBytes, cfg, provider
     tx.update(userRef, {
       ...r.userFields,
       activeGenerations: FieldValue.increment(1),
-      storageBytes: FieldValue.increment(imageBytes),
       usage: { minuteStart: inWindow ? usage.minuteStart : nowMs, minuteCount: minuteCount + 1, day, dayCount: dayCount + 1 },
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -212,10 +205,7 @@ async function reserve(db, { uid, generationId, input, imageBytes, cfg, provider
         title: input.title, type: input.type, content: input.content, memo: input.memo, info: input.info,
         volume: input.volume, imageCount: input.images.length,
       },
-      photos: [],
-      photosState: input.images.length ? PHOTO_STATE.PENDING : PHOTO_STATE.NONE,
-      photosExpireAt: null,
-      photoBytesReserved: imageBytes,
+      imageBytesSent: imageBytes,
       result: null,
       naver: null,
       provider,
@@ -232,7 +222,7 @@ async function reserve(db, { uid, generationId, input, imageBytes, cfg, provider
 }
 
 /** ③ 성공 확정 */
-async function finalize(db, { uid, generationId, result, naver, aiMeta, photos, nowMs }) {
+async function finalize(db, { uid, generationId, result, naver, aiMeta, nowMs }) {
   const userRef = db.collection(COL.USERS).doc(uid);
   const genRef = db.collection(COL.GENERATIONS).doc(generationId);
   return db.runTransaction(async (tx) => {
@@ -240,29 +230,22 @@ async function finalize(db, { uid, generationId, result, naver, aiMeta, photos, 
     const g = genSnap.data();
     if (!g || g.status !== GENERATION_STATUS.PROCESSING) return { finalized: false, status: g && g.status };
     const u = userSnap.data() || {};
-    const photoBytes = photos.reduce((n, p) => n + (p.bytes || 0), 0);
     const quality = checkResult(result, { volume: g.input.volume, imageCount: g.input.imageCount });
     tx.update(genRef, {
       status: GENERATION_STATUS.SUCCEEDED,
       result,
       naver: naver || null,
-      photos,
-      photosState: photos.length ? PHOTO_STATE.STORED : PHOTO_STATE.NONE,
-      photosExpireAt: photos.length ? Timestamp.fromMillis(nowMs + PHOTO_RETENTION_DAYS * DAY_MS) : null,
       model: aiMeta.model,
       'charge.status': 'captured',
       leaseExpiresAt: null,
       updatedAt: FieldValue.serverTimestamp(),
       completedAt: FieldValue.serverTimestamp(),
     });
-    // 예약했던 용량과 실제 저장 용량의 차이 보정
-    const storageFix = photoBytes - (g.photoBytesReserved || 0);
     tx.update(userRef, {
       activeGenerations: Math.max(0, (u.activeGenerations || 0) - 1),
-      storageBytes: Math.max(0, (u.storageBytes || 0) + storageFix),
       lastGenerationAt: Timestamp.fromMillis(nowMs),
     });
-    writeMetricsInTx(tx, db, { generationId, g, status: GENERATION_STATUS.SUCCEEDED, aiMeta, photoBytes, qualityFlags: quality.flags, nowMs });
+    writeMetricsInTx(tx, db, { generationId, g, status: GENERATION_STATUS.SUCCEEDED, aiMeta, qualityFlags: quality.flags, nowMs });
     return { finalized: true, credits: u.credits || 0, qualityFlags: quality.flags };
   });
 }
@@ -276,9 +259,9 @@ async function refund(db, { generationId, reason, retryable, aiMeta, nowMs, only
   return db.runTransaction(async (tx) => {
     const genSnap = await tx.get(genRef);
     const g = genSnap.data();
-    if (!g || g.status !== GENERATION_STATUS.PROCESSING) return { refunded: false, status: g && g.status, photos: [] };
+    if (!g || g.status !== GENERATION_STATUS.PROCESSING) return { refunded: false, status: g && g.status };
     if (onlyIfLeaseExpiredBefore != null && g.leaseExpiresAt && g.leaseExpiresAt.toMillis() > onlyIfLeaseExpiredBefore) {
-      return { refunded: false, status: g.status, photos: [] };
+      return { refunded: false, status: g.status };
     }
     const userRef = db.collection(COL.USERS).doc(g.uid);
     const userSnap = await tx.get(userRef);
@@ -303,7 +286,6 @@ async function refund(db, { generationId, reason, retryable, aiMeta, nowMs, only
       tx.update(userRef, {
         ...r.userFields,
         activeGenerations: Math.max(0, (u.activeGenerations || 0) - 1),
-        storageBytes: Math.max(0, (u.storageBytes || 0) - (g.photoBytesReserved || 0)),
         updatedAt: FieldValue.serverTimestamp(),
       });
     }
@@ -312,54 +294,39 @@ async function refund(db, { generationId, reason, retryable, aiMeta, nowMs, only
       error: { reason, message: USER_MESSAGE[reason] || USER_MESSAGE.internal, retryable: retryable !== false },
       'charge.status': 'refunded',
       'charge.refundLedgerId': refundLedgerId,
-      photos: [],
-      photosState: (g.photos || []).length ? PHOTO_STATE.DELETED : g.photosState === PHOTO_STATE.PENDING ? PHOTO_STATE.DELETED : PHOTO_STATE.NONE,
       leaseExpiresAt: null,
       updatedAt: FieldValue.serverTimestamp(),
       completedAt: Timestamp.fromMillis(nowMs),
     });
-    writeMetricsInTx(tx, db, { generationId, g, status: GENERATION_STATUS.FAILED, aiMeta: aiMeta ? { ...aiMeta, reason } : null, failureReason: reason, photoBytes: 0, nowMs });
-    return { refunded: true, photos: g.photos || [], uid: g.uid, credits: r.balanceAfter };
+    writeMetricsInTx(tx, db, { generationId, g, status: GENERATION_STATUS.FAILED, aiMeta: aiMeta ? { ...aiMeta, reason } : null, failureReason: reason, nowMs });
+    return { refunded: true, uid: g.uid, credits: r.balanceAfter };
   });
 }
 
-/** 실패한 생성의 사진 삭제: 즉시 시도, 실패하면 삭제 작업 등록 (용량은 refund 에서 이미 반환) */
-async function cleanupFailedPhotos(db, bucket, generationId, uid, photos, nowMs) {
-  const paths = (photos || []).map((p) => p.path);
-  // 업로드 중 실패했을 수 있으므로 경로 대신 생성 폴더 전체를 대상으로
-  const prefix = `users/${uid}/generations/${generationId}/`;
-  try {
-    await bucket.deleteFiles({ prefix, force: true });
-  } catch (e) {
-    await jobs.enqueue(db, `failed_${generationId}`, { type: 'prefix', uid: null, prefix, paths, bytesToRelease: 0, reason: 'generation_failed' }, nowMs);
-  }
-}
-
 /** ④ lease 가 지난 processing 건 복구 */
-async function recoverIfStale(db, bucket, generationId, nowMs) {
+async function recoverIfStale(db, generationId, nowMs) {
   const r = await refund(db, { generationId, reason: 'timeout_recovered', retryable: true, aiMeta: { aiCallStarted: true, reason: 'ai_timeout' }, nowMs, onlyIfLeaseExpiredBefore: nowMs });
-  if (r.refunded && bucket) await cleanupFailedPhotos(db, bucket, generationId, r.uid, r.photos, nowMs);
   return r.refunded;
 }
 
-async function sweepStale(db, bucket, nowMs, limit = 50) {
+async function sweepStale(db, nowMs, limit = 50) {
   const snap = await db.collection(COL.GENERATIONS)
     .where('status', '==', GENERATION_STATUS.PROCESSING)
     .where('leaseExpiresAt', '<', Timestamp.fromMillis(nowMs))
     .limit(limit).get();
   let n = 0;
-  for (const d of snap.docs) if (await recoverIfStale(db, bucket, d.id, nowMs)) n++;
+  for (const d of snap.docs) if (await recoverIfStale(db, d.id, nowMs)) n++;
   return n;
 }
 
 /** 조회 (본인 것만). processing 인데 lease 가 지났으면 이 자리에서 복구 */
-async function getStatus(db, bucket, { uid, generationId, nowMs }) {
+async function getStatus(db, { uid, generationId, nowMs }) {
   const ref = db.collection(COL.GENERATIONS).doc(generationId);
   let snap = await ref.get();
   if (!snap.exists || snap.data().uid !== uid) throw new CreditError('not-found', '생성 기록을 찾을 수 없어요.');
   const g = snap.data();
   if (g.status === GENERATION_STATUS.PROCESSING && g.leaseExpiresAt && g.leaseExpiresAt.toMillis() < nowMs) {
-    await recoverIfStale(db, bucket, generationId, nowMs);
+    await recoverIfStale(db, generationId, nowMs);
     snap = await ref.get();
   }
   return publicView(generationId, snap.data());
@@ -367,12 +334,12 @@ async function getStatus(db, bucket, { uid, generationId, nowMs }) {
 
 /**
  * 전체 생성 흐름.
- * @param {object} deps { db, bucket, ai:{client, provider}, naver:{clientId, clientSecret, find}|null, logger, now:()=>number, gateCacheMs? }
+ * @param {object} deps { db, ai:{client, provider}, naver:{clientId, clientSecret, find}|null, logger, now:()=>number, gateCacheMs? }
  * @param {object} cfg  runtimeConfig()
  * @param {{uid:string, input:object, onChunk?:Function}} req
  */
 async function generate(deps, cfg, { uid, input, onChunk, caller }) {
-  const { db, bucket, ai, logger } = deps;
+  const { db, ai, logger } = deps;
   const now = deps.now || Date.now;
   const generationId = generationIdOf(uid, input.clientRequestId);
   const imageBytes = totalImageBytes(input.images);
@@ -385,23 +352,14 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
   const res = await reserve(db, { uid, generationId, input, imageBytes, cfg, provider: ai.provider, nowMs: now() });
   if (!res.reserved) {
     // 같은 요청이 이미 있음 (더블클릭/재전송) → 추가 차감 없이 현재 상태 반환
-    return { ...(await getStatus(db, bucket, { uid, generationId, nowMs: now() })), duplicate: true };
+    return { ...(await getStatus(db, { uid, generationId, nowMs: now() })), duplicate: true };
   }
   send({ type: 'status', message: '💳 1크레딧 예약 완료 (실패 시 자동 복구)', generationId });
 
   const started = now();
   let aiMeta = { aiCallStarted: false };
-  let photos = [];
   try {
-    if (input.images.length) {
-      send({ type: 'status', message: `📸 사진 ${input.images.length}장 저장 중...` });
-      try {
-        photos = await savePhotos(bucket, uid, generationId, input.images);
-      } catch (e) {
-        throw new AiError('storage_failed', 'storage failed');
-      }
-      await db.collection(COL.GENERATIONS).doc(generationId).update({ photos });
-    }
+    if (input.images.length) send({ type: 'status', message: `📸 사진 ${input.images.length}장을 AI 분석용으로 전달해요 (서버에 저장하지 않아요)` });
 
     let naver = null;
     if (deps.naver && deps.naver.clientId) {
@@ -434,12 +392,12 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
     const result = parseGeneration(out.text, input.title);
     if (!out.text.trim() || !result.body || !result.body.trim()) throw new AiError('ai_empty_result', 'empty result', { usage: out.usage, responseStarted: true });
 
-    const fin = await finalize(db, { uid, generationId, result, naver, aiMeta, photos, nowMs: now() });
+    const fin = await finalize(db, { uid, generationId, result, naver, aiMeta, nowMs: now() });
     if (!fin.finalized) {
       // lease 만료로 이미 복구된 경우 (함수 제한 300초 < lease 360초 라 정상 흐름에서는 발생하지 않음)
       throw new AiError('timeout_recovered', 'already refunded');
     }
-    logger && logger.info('generation succeeded', { generationId, model: aiMeta.model, usage: aiMeta.usage, latencyMs: aiMeta.latencyMs, photos: photos.length, qualityFlags: fin.qualityFlags });
+    logger && logger.info('generation succeeded', { generationId, model: aiMeta.model, usage: aiMeta.usage, latencyMs: aiMeta.latencyMs, imageCount: input.images.length, qualityFlags: fin.qualityFlags });
     const userSnap = await db.collection(COL.USERS).doc(uid).get();
     return {
       ...publicView(generationId, (await db.collection(COL.GENERATIONS).doc(generationId).get()).data()),
@@ -454,8 +412,7 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
     aiMeta.latencyMs = now() - started;
     // 로그에는 사유 코드·상태만 (입력 내용·이메일·키·오류 원문 제외)
     logger && logger.warn('generation failed', { generationId, reason: c.reason, status: c.status || null, requestId: (err && err.requestID) || null, responseStarted: !!aiMeta.responseStarted });
-    const r = await refund(db, { generationId, reason: c.reason, retryable: c.retryable, aiMeta, nowMs: now() });
-    if (r.refunded) await cleanupFailedPhotos(db, bucket, generationId, uid, r.photos.length ? r.photos : photos, now());
+    await refund(db, { generationId, reason: c.reason, retryable: c.retryable, aiMeta, nowMs: now() });
     const userSnap = await db.collection(COL.USERS).doc(uid).get();
     throw new CreditError(
       c.retryable ? 'unavailable' : 'failed-precondition',
@@ -467,5 +424,5 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
 
 module.exports = {
   generate, reserve, finalize, refund, recoverIfStale, sweepStale, getStatus, generationIdOf, publicView, kstDay,
-  checkServiceGate, resetGateCache, cleanupFailedPhotos, USER_MESSAGE,
+  checkServiceGate, resetGateCache, USER_MESSAGE,
 };

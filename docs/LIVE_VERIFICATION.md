@@ -53,7 +53,7 @@ ANTHROPIC_API_KEY="$(gcloud secrets versions access latest --secret=ANTHROPIC_AP
    ```
    AI_MOCK=false
    ```
-3. `npm run emulators:clean` + `npm run dev` → 가입·인증 → 사진 0/3장으로 2회 생성 → 3회째 차단 → 저장·다시 열기
+3. `npm run emulators:clean` + `npm run dev` → 가입·인증 → 사진 0/3장으로 2회 생성 → 3회째 차단 → 저장·다시 열기(사진은 다시 첨부해야 표시)
 4. 끝나면 `functions/.env.local` 삭제 (다시 mock 으로)
 
 ## 5. 배포 후 스테이징 확인

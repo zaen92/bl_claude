@@ -13,10 +13,23 @@ export const subscribePosts = (uid, cb) =>
     (e) => { console.warn('posts', e); cb([]); },
   );
 
-export function createPost(uid, { title, type, data, generationId = null, photos = [] }) {
+/** 입력값 중 텍스트만 저장 (사진·Base64 는 저장하지 않음) */
+function textInput(i) {
+  if (!i) return null;
+  const s = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const n = Number(i.imageCount);
+  return {
+    title: s(i.title, 200), memo: s(i.memo, 2000), content: s(i.content, 5000), info: s(i.info, 2000),
+    type: s(i.type, 20), volume: ['short', 'normal', 'long'].includes(i.volume) ? i.volume : 'normal',
+    imageCount: Number.isInteger(n) && n >= 0 && n <= 10 ? n : 0,
+  };
+}
+
+export function createPost(uid, { title, type, data, generationId = null, input = null }) {
+  const ti = textInput(input);
   return addDoc(collection(db, 'posts'), {
     uid, title: (title || '제목 없음').slice(0, 300), type: type || '', data, generationId,
-    photos: photos.slice(0, 10).map((p) => ({ path: p.path, index: p.index || 0 })),
+    ...(ti ? { input: ti } : {}),
     createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
   });
 }

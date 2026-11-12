@@ -49,7 +49,7 @@
 |---|---|---|
 | 저장된 글 (`jaeinit_saved_posts`: `{id,title,type,date,data}`) | localStorage | 로그인 후 "저장된 글" 탭에 **계정으로 가져오기** 배너 표시. 문서 ID `legacy_{uid}_{기존id}` 로 고정 → 여러 번 눌러도 중복 없음. **localStorage 원본은 삭제하지 않음**(백업). `data` 객체는 변환 없이 그대로 저장 |
 | 생성 결과 (`resultData`) | 메모리 | 동일 구조(GenerationResult) 유지 → 기존 저장 글도 그대로 불러오기/미리보기 가능 |
-| 업로드 사진 (`imgs`) | 메모리 (새로고침 시 사라짐) | STEP 2: 생성 시 서버가 Cloud Storage 에 저장 → 생성 이력·저장 글에서 다시 열면 표시 ([STORAGE.md](STORAGE.md)) |
+| 업로드 사진 (`imgs`) | 메모리 (새로고침 시 사라짐) | **기존과 동일하게 브라우저 메모리에만**. 생성 시 서버를 거쳐 Claude 로 전달되지만 서버에 저장하지 않음. 결과에는 `[사진N]` 배치만 남음 ([PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md)) |
 | 입력 중인 폼 | 메모리 | 기존과 동일 |
 | API 키 | localStorage | 보안상 삭제. 서버 Secret Manager 로 이전 |
 

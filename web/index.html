@@ -155,7 +155,9 @@
         <div class="empty-i">📝</div>
         <div style="font-size:15px;color:#aaa">포스팅을 생성해보세요</div>
         <div style="font-size:12px;color:#bbb;line-height:1.6">왼쪽에 내용을 입력하고<br>생성 버튼을 누르세요</div>
+        <button class="auth-link" onclick="importJson()" style="font-size:11px;margin-top:4px">📥 JSON 파일 불러오기</button>
       </div>
+      <input type="file" id="jsonFile" accept="application/json,.json" style="display:none" onchange="onJsonFile(event)">
       <div class="load" id="load">
         <div class="load-s" id="lst">분석 중...</div>
         <div class="load-bw"><div class="load-b" id="lb"></div></div>
@@ -174,7 +176,8 @@
         <div class="sl">릴스 / 숏폼 자막</div><div class="et" id="rt"></div><button class="cp" onclick="cpId('rt',this)">📋 자막 복사</button>
         <div class="dv"></div>
         <div class="sl">썸네일 문구</div><div class="et" id="th"></div><button class="cp" onclick="cpId('th',this)">📋 썸네일 복사</button>
-        <div class="ar"><button class="ab p" onclick="cpAll()">📋 전체 복사</button><button class="ab" onclick="savePost()" id="saveBtn">💾 저장</button><button class="ab" onclick="reset()">🔄 새로 작성</button></div>
+        <div class="ar"><button class="ab p" onclick="cpAll()">📋 전체 복사</button><button class="ab" onclick="savePost()" id="saveBtn">💾 저장</button><button class="ab" onclick="exportJson()" id="exportBtn">📤 JSON</button><button class="ab" onclick="reset()">🔄 새로 작성</button></div>
+        <div style="text-align:center;margin-top:10px"><button class="auth-link" onclick="importJson()" style="font-size:11px">📥 JSON 파일 불러오기</button></div>
       </div></div>
     </div>
     <div class="right" id="rightPreview" style="display:none">

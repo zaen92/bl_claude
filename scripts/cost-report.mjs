@@ -6,7 +6,6 @@
 //   벤치마크 결과 기준:
 //     node scripts/cost-report.mjs --benchmark cost-reports/benchmark-....json --usd-krw 1400 --pg-fee 0.03
 //   가격 후보 비교 (선택): --prices 10:5900,30:14900,70:29900   목표 마진: --margin 0.5
-//   사진 보관 원가 반영: --storage-months 3 (사진 1회분을 N개월 보관한다고 가정, 기본 3)
 import { createRequire } from 'node:module';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -15,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(join(ROOT, 'functions/package.json'));
 const { summarize, pnl } = require('./src/ops/costAnalysis');
-const { STORAGE_USD_PER_GB_MONTH, PRICING_VERIFIED_AT } = require('./src/config/pricing');
+const { PRICING_VERIFIED_AT } = require('./src/config/pricing');
 
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf('--' + k); return i >= 0 && args[i + 1] ? args[i + 1] : d; };
@@ -42,10 +41,9 @@ if (!rows.length) { console.error('데이터가 없습니다'); process.exit(1);
 const s = summarize(rows);
 const usdKrw = Number(opt('usd-krw', '0'));
 const pgFee = opt('pg-fee') ? Number(opt('pg-fee')) : undefined;
-const months = Number(opt('storage-months', '3'));
-const storageUsd = (s.avgPhotoBytesPerSuccess / 1e9) * STORAGE_USD_PER_GB_MONTH * months;
-const perGen = (s.succeeded.avgUsd || 0) + s.failureOverheadPerSuccessUsd + s.computeUsdPerSuccess + storageUsd;
-const perGenWorst = (s.succeeded.p95Usd || 0) + s.failureOverheadPerSuccessUsd + s.computeUsdPerSuccess + storageUsd;
+// 사진은 서버에 저장하지 않으므로 저장 비용 없음
+const perGen = (s.succeeded.avgUsd || 0) + s.failureOverheadPerSuccessUsd + s.computeUsdPerSuccess;
+const perGenWorst = (s.succeeded.p95Usd || 0) + s.failureOverheadPerSuccessUsd + s.computeUsdPerSuccess;
 
 const fmt = (o) => `${o.count}건 · 평균 $${o.avgUsd} · p50 $${o.p50Usd} · p95 $${o.p95Usd} · 최대 $${o.maxUsd} · 입력 ${o.avgInputTokens} / 출력 ${o.avgOutputTokens} 토큰 · 검색 ${o.avgWebSearches}회`;
 let md = `# 비용 리포트\n\n- 데이터: ${source}\n- 단가 기준: Anthropic 정가 (확인일 ${PRICING_VERIFIED_AT}), 실제 청구액은 Anthropic Console 과 대조 필요\n\n`;
@@ -55,8 +53,8 @@ for (const [title, g] of [['모델별', s.byModel], ['사진 장수별', s.byPho
   for (const [k, o] of Object.entries(g)) md += `| ${k} | ${o.count} | ${o.avgUsd} | ${o.p95Usd} | ${o.maxUsd} | ${o.avgInputTokens} | ${o.avgOutputTokens} |\n`;
 }
 md += `\n## 실패 호출\n- ${s.failed.count}건, 비용 $${s.failed.costUsd} (과금 추정 구분: ${JSON.stringify(s.failed.billing)})\n- 성공 1건당 실패 부담: $${s.failureOverheadPerSuccessUsd} (크레딧은 복구되므로 회사 부담)\n`;
-md += `\n## 서버·저장 비용 (추정)\n- Functions 실행: 성공 1건당 $${s.computeUsdPerSuccess}\n- 사진 저장: 1건 평균 ${(s.avgPhotoBytesPerSuccess / 1e6).toFixed(2)}MB × ${months}개월 × $${STORAGE_USD_PER_GB_MONTH}/GB-월 = $${storageUsd.toFixed(6)}\n`;
-md += `\n## 생성 1회 원가\n- 평균: **$${perGen.toFixed(4)}** (AI 평균 + 실패 부담 + 서버 + 저장)\n- 보수적(p95): **$${perGenWorst.toFixed(4)}**\n`;
+md += `\n## 서버 비용 (추정)\n- Functions 실행: 성공 1건당 $${s.computeUsdPerSuccess} (사진은 저장하지 않아 저장 비용 없음)\n`;
+md += `\n## 생성 1회 원가\n- 평균: **$${perGen.toFixed(4)}** (AI 평균 + 실패 부담 + 서버)\n- 보수적(p95): **$${perGenWorst.toFixed(4)}**\n`;
 
 if (usdKrw > 0) {
   const prices = Object.fromEntries((opt('prices', '') || '').split(',').filter(Boolean).map((x) => x.split(':').map(Number)));

@@ -197,7 +197,6 @@ async function ensureUserProfile(db, authUser) {
         signupBonus: bonus,
         role: 'user', // 표시용. 실제 권한은 custom claim(admin)으로만 판단
         activeGenerations: 0,
-        storageBytes: 0,
         createdAt: now,
       });
     }

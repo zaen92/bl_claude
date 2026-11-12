@@ -23,8 +23,8 @@
 | **합계** | | **평균 ≈ $0.10~0.15, 최대(사진 10장·긴 글·검색 5회) ≈ $0.25 내외** |
 
 ## 자동 기록
-- `generationMetrics/{generationId}` (관리자 전용, 입력 내용 없음): 모델, 사진 장수·용량, 분량, `usage`(입력/출력/캐시/웹검색), `costUsd`, `costBreakdown`(입력·출력·캐시·검색), `latencyMs`, `computeUsdEst`(서버 비용 추정), `billing`, `qualityFlags`
-- `opsDaily/{YYYY-MM-DD}` (KST): 성공/실패 수, `aiCostUsd`, `aiCostUsdFailed`, 토큰 합계, 검색 수, `computeUsdEst`, `photoBytesAdded`, 모델별 건수·비용 → 일일 비용 상한 판단에도 사용
+- `generationMetrics/{generationId}` (관리자 전용, 입력 내용 없음): 모델, 사진 장수·보낸 크기(저장 안 함), 분량, `usage`(입력/출력/캐시/웹검색), `costUsd`, `costBreakdown`(입력·출력·캐시·검색), `latencyMs`, `computeUsdEst`(서버 비용 추정), `billing`, `qualityFlags`
+- `opsDaily/{YYYY-MM-DD}` (KST): 성공/실패 수, `aiCostUsd`, `aiCostUsdFailed`, 토큰 합계, 검색 수, `computeUsdEst`, 모델별 건수·비용 → 일일 비용 상한 판단에도 사용
 
 ### 실패한 호출의 비용 (`billing` 필드)
 | 값 | 의미 | 근거 |
@@ -51,7 +51,7 @@
 
 ## 크레딧 상품 손익 분석 (10 / 30 / 70회)
 `cost-report` 가 계산하는 것 (가격은 입력하지 않으면 계산만 함):
-- 생성 1회 원가 = AI 평균 비용 + 실패 호출 부담(성공 1건당) + Functions 실행 비용 + 사진 저장(평균 용량 × 보관 개월)
+- 생성 1회 원가 = AI 평균 비용 + 실패 호출 부담(성공 1건당) + Functions 실행 비용 (사진은 저장하지 않아 저장 비용 없음)
 - 보수적 원가 = p95 AI 비용 기준
 - 상품별 원가, **손익분기 가격**, **목표 마진 가격**(기본 50%), 가격 후보를 넣으면 순매출(부가세 10%·PG 수수료 차감)·마진·p95 기준 마진
 - 가입자 1명당 무료 2회 원가 (마케팅 비용으로 별도 관리)

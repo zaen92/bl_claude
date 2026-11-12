@@ -7,10 +7,9 @@
  *   generatePost          실제 Claude 생성 + 1크레딧 차감/복구 (스트리밍)              (STEP 2)
  *   getGenerationStatus   생성 상태 조회 (새로고침·네트워크 끊김 후 복구)               (STEP 2)
  *   sweepStaleGenerations 5분마다 멈춘 생성 건 크레딧 복구                             (STEP 2)
- *   photoRetentionDaily   매일 04:10 KST 보관 기간(90일) 지난 미저장 생성 사진 삭제 작업 등록 (STEP 2.5)
- *   processPhotoDeletionJobs 10분마다 사진 삭제 작업 실행·재시도                       (STEP 2.5)
- *   deleteAccount / onAuthUserDeleted  회원 탈퇴 시 사진·글·생성 기록 삭제             (STEP 2.5)
- *   adminCheckAiConfig / adminRetryDeletionJob  관리자 점검 도구                       (STEP 2.5)
+ *   deleteAccount / onAuthUserDeleted  회원 탈퇴 시 글·생성 기록 삭제                  (STEP 2.5)
+ *   adminCheckAiConfig    관리자 AI 설정 점검                                         (STEP 2.5)
+ *   ※ 사진은 Claude 분석용으로 요청에서만 사용하고 서버에 저장하지 않는다 (Cloud Storage 미사용)
  *   createOrder / confirmPayment  인터페이스만 (STEP 3, 토스페이먼츠)
  */
 const { onCall, HttpsError } = require('firebase-functions/https');
@@ -20,7 +19,6 @@ const logger = require('firebase-functions/logger');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const { getAuth } = require('firebase-admin/auth');
-const { getStorage } = require('firebase-admin/storage');
 
 const { REGION } = require('./src/lib/schema');
 const credits = require('./src/lib/credits');
@@ -29,8 +27,6 @@ const { runtimeConfig } = require('./src/config/params');
 const { ANTHROPIC_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, secretValue } = require('./src/config/secrets');
 const service = require('./src/generation/service');
 const { findPlace } = require('./src/naver');
-const retention = require('./src/storage/retention');
-const deletionJobs = require('./src/storage/deletionJobs');
 const { deleteAccountData } = require('./src/account/deleteAccount');
 const { webSearchToolType } = require('./src/ai/claude');
 const functionsV1 = require('firebase-functions/v1');
@@ -147,7 +143,7 @@ exports.generatePost = onCall({
   const streaming = !!(response && request.acceptsStreaming);
   try {
     return await service.generate(
-      { db: getFirestore(), bucket: getStorage().bucket(), ai, naver: naverDeps(), logger },
+      { db: getFirestore(), ai, naver: naverDeps(), logger },
       runtimeConfig(),
       { uid: auth.uid, input, caller: { email: auth.token.email || null, admin: auth.token.admin === true }, onChunk: streaming ? (c) => { response.sendChunk(c).catch(() => {}); } : null },
     );
@@ -161,26 +157,15 @@ exports.getGenerationStatus = onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, asy
   const id = request.data && request.data.generationId;
   if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,200}$/.test(id)) throw new HttpsError('invalid-argument', 'generationId 가 필요해요.');
   try {
-    return await service.getStatus(getFirestore(), getStorage().bucket(), { uid, generationId: id, nowMs: Date.now() });
+    return await service.getStatus(getFirestore(), { uid, generationId: id, nowMs: Date.now() });
   } catch (err) {
     throw toHttpsError(err);
   }
 });
 
 exports.sweepStaleGenerations = onSchedule({ schedule: 'every 5 minutes', timeZone: 'Asia/Seoul' }, async () => {
-  const n = await service.sweepStale(getFirestore(), getStorage().bucket(), Date.now());
+  const n = await service.sweepStale(getFirestore(), Date.now());
   if (n) logger.warn('stale generations refunded', { count: n });
-});
-
-exports.photoRetentionDaily = onSchedule({ schedule: '10 4 * * *', timeZone: 'Asia/Seoul', timeoutSeconds: 540 }, async () => {
-  const r = await retention.scanExpired(getFirestore(), Date.now());
-  logger.info('photo retention scan', r);
-});
-
-exports.processPhotoDeletionJobs = onSchedule({ schedule: 'every 10 minutes', timeZone: 'Asia/Seoul', timeoutSeconds: 540 }, async () => {
-  const r = await deletionJobs.processJobs(getFirestore(), getStorage().bucket(), Date.now());
-  if (r.failed) logger.error('photo deletion jobs failed (관리자 확인 필요: photoDeletionJobs status==failed)', r);
-  else if (r.done || r.retry) logger.info('photo deletion jobs', r);
 });
 
 /**
@@ -195,10 +180,10 @@ exports.deleteAccount = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, timeoutSeco
     throw new HttpsError('failed-precondition', '보안을 위해 다시 로그인한 뒤 탈퇴를 진행해주세요.', { reason: 'requires_recent_login' });
   }
   try {
-    const r = await deleteAccountData(getFirestore(), getStorage().bucket(), auth.uid, { source: 'user_request' });
+    const r = await deleteAccountData(getFirestore(), auth.uid, { source: 'user_request' });
     await getAuth().deleteUser(auth.uid);
-    logger.info('account deleted', { storage: r.storage, posts: r.posts, generations: r.generations });
-    return { deleted: true, storage: r.storage };
+    logger.info('account deleted', { posts: r.posts, generations: r.generations });
+    return { deleted: true };
   } catch (err) {
     throw toHttpsError(err);
   }
@@ -206,8 +191,8 @@ exports.deleteAccount = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, timeoutSeco
 
 /** 관리자가 콘솔에서 계정을 지운 경우 등에도 데이터 정리 (멱등) */
 exports.onAuthUserDeleted = functionsV1.region(REGION).auth.user().onDelete(async (user) => {
-  const r = await deleteAccountData(getFirestore(), getStorage().bucket(), user.uid, { source: 'auth_trigger' });
-  logger.info('account data cleaned by trigger', { storage: r.storage, posts: r.posts, generations: r.generations });
+  const r = await deleteAccountData(getFirestore(), user.uid, { source: 'auth_trigger' });
+  logger.info('account data cleaned by trigger', { posts: r.posts, generations: r.generations });
 });
 
 /** 관리자: AI 설정 점검 (키 존재·형식, 모델 사용 가능 여부, 웹 검색 지원) — 키 값은 반환하지 않음, 생성 비용 없음 */
@@ -245,17 +230,6 @@ exports.adminCheckAiConfig = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, secret
     }
   }
   return out;
-});
-
-/** 관리자: 실패한 사진 삭제 작업 재시도 */
-exports.adminRetryDeletionJob = onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, async (request) => {
-  requireAdmin(request);
-  const id = request.data && request.data.jobId;
-  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{3,200}$/.test(id)) throw new HttpsError('invalid-argument', 'jobId 가 필요해요.');
-  const ok = await deletionJobs.resetJob(getFirestore(), id, Date.now());
-  if (!ok) throw new HttpsError('not-found', '작업을 찾을 수 없어요.');
-  const r = await deletionJobs.runJob(getFirestore(), getStorage().bucket(), id, Date.now());
-  return { result: r };
 });
 
 /** @returns {Promise<import('./src/api/contracts').CreateOrderResponse>} STEP 3 */

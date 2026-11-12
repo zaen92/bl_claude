@@ -91,7 +91,6 @@ export function renderPreview() {
     if (m) {
       const idx = m[1] ? parseInt(m[1], 10) - 1 : imgIdx;
       if (imgs[idx]) bodyHtml += '<div class="pp-img"><img src="' + esc(imgs[idx]) + '" alt="사진' + (idx + 1) + '"></div>';
-      else if (state.previewPhotos && idx < state.previewPhotos.length) bodyHtml += '<div class="pp-img-empty"><div class="pp-img-empty-ico">🗂️</div><div class="pp-img-empty-txt">사진' + (idx + 1) + ' — 보관 기간이 지나 삭제된 사진이에요</div></div>';
       else bodyHtml += '<div class="pp-img-empty"><div class="pp-img-empty-ico">📸</div><div class="pp-img-empty-txt">사진' + (idx + 1) + ' — 왼쪽에서 사진을 업로드하세요</div></div>';
       imgIdx++;
     } else {

@@ -19,7 +19,6 @@
 | paidCredits | int | 유료 구매 크레딧 (STEP 3) |
 | creditsUpdatedAt | Timestamp | |
 | activeGenerations | int | 처리 중인 생성 수 (동시 실행 상한 판단) |
-| storageBytes | int | 보관 중인 사진 총 용량 (사용자별 상한 판단) |
 | usage | map | `{minuteStart(ms), minuteCount, day('YYYY-MM-DD' KST), dayCount}` — 분당/일일 한도 |
 | lastGenerationAt | Timestamp | |
 | signupBonus | map | `{status: 'granted'\|'pending_verification'\|'ineligible', amount, reason?, grantedAt?}` |
@@ -88,12 +87,7 @@
 |---|---|---|
 | uid / clientRequestId | string | |
 | status | string | `processing`(1크레딧 예약됨) → `succeeded`(차감 확정) / `failed`(크레딧 복구됨) |
-| input | map | `{title, type, content, memo, info, volume, imageCount}` (사진 원본은 Storage) |
-| photos | list | `[{path, bytes, contentType, index}]` — `users/{uid}/generations/{id}/photo_N.jpg` (보관 기간 후 삭제되면 `[]`) |
-| photoBytesReserved | int | 예약한 저장 용량 (실패 시 반환) |
-| photosState | string | `none` · `pending`(업로드 중) · `stored` · `deleting` · `deleted` |
-| photosExpireAt | Timestamp\|null | 보관 검사 시각 (생성 + 90일, 저장 글이 참조하면 7일씩 연장) |
-| photosKeptBy / photosCheckedAt / photosDeletedAt | | 보관 검사 기록 |
+| input | map | `{title, type, content, memo, info, volume, imageCount}` — **텍스트만, 사진은 저장하지 않음** |
 | result | map\|null | GenerationResult |
 | naver | map\|null | `{name, address, tel, category, link}` |
 | provider | string | `anthropic` / `mock`(에뮬레이터) |
@@ -114,7 +108,7 @@
 | title | string ≤ 300 | |
 | type | string ≤ 20 | 글 유형 |
 | data | map | **GenerationResult — 기존 localStorage `data` 와 동일 구조** |
-| photos | list ≤ 10 | `[{path, index}]` 생성 시 저장된 사진 (다시 열 때 표시) |
+| input | map | `{title, memo, content, info, type, volume, imageCount}` 입력값 (텍스트만). 사진·Base64 불가 — 본문에 `data:image` 가 섞이면 규칙이 거부 |
 | generationId | string\|null | 원본 생성 기록 |
 | legacyId / legacySavedAt | int\|string / string | localStorage 에서 가져온 글만 |
 | createdAt / updatedAt | Timestamp | `request.time` 강제 |
@@ -125,16 +119,13 @@
 ## 운영 컬렉션 (서버 전용 쓰기 · 관리자만 읽기, STEP 2.5)
 ### generationMetrics/{generationId}
 생성 1건의 비용·품질 (입력 내용·이메일 없음, 회원 탈퇴 후에도 회계용으로 보관):
-`uid, generationId, status, provider, model, type, volume, imageCount, photoBytes, usage{inputTokens,outputTokens,cacheCreationInputTokens,cacheReadInputTokens,webSearchRequests}, costUsd, costKnown, costBreakdown{input,output,cacheWrite,cacheRead,webSearch}, billing('full'|'none'|'partial_lower_bound'|'unknown'), aiCallStarted, apiRequestCount, latencyMs, computeUsdEst, failureReason, qualityFlags[], day('YYYY-MM-DD' KST), createdAt`
+`uid, generationId, status, provider, model, type, volume, imageCount, imageBytesSent, usage{inputTokens,outputTokens,cacheCreationInputTokens,cacheReadInputTokens,webSearchRequests}, costUsd, costKnown, costBreakdown{input,output,cacheWrite,cacheRead,webSearch}, billing('full'|'none'|'partial_lower_bound'|'unknown'), aiCallStarted, apiRequestCount, latencyMs, computeUsdEst, failureReason, qualityFlags[], day('YYYY-MM-DD' KST), createdAt`
 
 ### opsDaily/{YYYY-MM-DD}  (KST)
-`succeeded, failed, aiCostUsd, aiCostUsdFailed, inputTokens, outputTokens, webSearchRequests, computeUsdEst, photoBytesAdded, byModel{<model>:{count,costUsd}}` — 일일 비용 상한 판단
-
-### photoDeletionJobs/{jobId}
-`type('generation'|'paths'|'prefix'), uid, generationId?, paths[], prefix?, bytesToRelease, reason, status('pending'|'running'|'done'|'failed'), attempts, lastError{code,message}, nextAttemptAt, createdAt, doneAt` — ID: `gen_{generationId}` · `failed_{generationId}` · `user_{uid}`
+`succeeded, failed, aiCostUsd, aiCostUsdFailed, inputTokens, outputTokens, webSearchRequests, computeUsdEst, imageBytesSentAdded, byModel{<model>:{count,costUsd}}` — 일일 비용 상한 판단
 
 ### accountDeletions/{uid}
-`source('user_request'|'auth_trigger'), status('running'|'done'|'storage_pending'), storage, posts, generations, startedAt, completedAt`
+`source('user_request'|'auth_trigger'), status('running'|'done'), posts, generations, startedAt, completedAt`
 
 ### config/service  (관리자 읽기·쓰기)
 `generationEnabled(bool), pauseMessage(string ≤200), dailyCostLimitUsd(number), accessMode('open'|'allowlist'), allowedEmails(string[] ≤200)` — 재배포 없이 생성 일시중지·비용 상한·스테이징 테스터 관리
@@ -143,12 +134,8 @@
 읽기·쓰기: 🖥️ 전용 (관리자 클라이언트도 불가)
 `{uid, amount, grantedAt}` — 계정을 삭제하고 같은 이메일(Gmail 점/`+태그` 변형 포함)로 재가입해도 보너스를 다시 받지 못하게 합니다. 이메일 원문은 저장하지 않습니다.
 
-## Cloud Storage
-| 경로 | 쓰기 | 읽기 |
-|---|---|---|
-| `users/{uid}/generations/{generationId}/photo_{n}.{jpg\|png\|webp}` | 🖥️ 전용 | 본인, 관리자 |
-
-보관 정책·비용: [STORAGE.md](STORAGE.md)
+## 사진
+사진은 **어디에도 저장하지 않습니다** (Cloud Storage 미사용, Firestore 에는 `imageCount` 와 본문 `[사진N]` 배치만). 자세한 내용: [PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md)
 
 ## 인덱스
-`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, generations `status + leaseExpiresAt`(스테일 복구), generations `photosState + photosExpireAt`(사진 보관), photoDeletionJobs `status + nextAttemptAt`, posts `uid + generationId`(참조 확인).
+`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, generations `status + leaseExpiresAt`(스테일 복구).

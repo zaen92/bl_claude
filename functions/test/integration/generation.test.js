@@ -1,26 +1,24 @@
 'use strict';
-// AI 생성 + 크레딧 차감/복구 통합 테스트 — Firestore + Storage 에뮬레이터, Claude 는 mock 클라이언트 (실제 API 호출 아님)
+// AI 생성 + 크레딧 차감/복구 통합 테스트 — Firestore 에뮬레이터 (사진은 서버에 저장하지 않음), Claude 는 mock 클라이언트 (실제 API 호출 아님)
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { initializeApp, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-const { getStorage } = require('firebase-admin/storage');
 const { ensureUserProfile, adminAdjustCredits } = require('../../src/lib/credits');
 const service = require('../../src/generation/service');
 const { createMockClient } = require('../../src/ai/mockClient');
 const { validateGenerateInput } = require('../../src/api/validate');
 
-if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_STORAGE_EMULATOR_HOST) throw new Error('Firestore/Storage 에뮬레이터에서 실행하세요 (npm run test:emu)');
-const app = getApps()[0] || initializeApp({ projectId: 'demo-jaeinit', storageBucket: 'demo-jaeinit.appspot.com' });
+if (!process.env.FIRESTORE_EMULATOR_HOST) throw new Error('Firestore 에뮬레이터에서 실행하세요 (npm run test:emu)');
+const app = getApps()[0] || initializeApp({ projectId: 'demo-jaeinit' });
 const db = getFirestore(app);
-const bucket = getStorage(app).bucket();
 
 // 1x1 JPEG
 const JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
 
 const CFG = {
   model: 'claude-sonnet-4-6', maxTokens: 8192, claudeTimeoutMs: 10_000, webSearchMaxUses: 5, webSearchToolType: 'auto',
-  rateLimitPerMinute: 100, dailyLimit: 100, maxConcurrent: 5, storageQuotaBytes: 200 * 1024 * 1024, leaseSeconds: 360,
+  rateLimitPerMinute: 100, dailyLimit: 100, maxConcurrent: 5, leaseSeconds: 360,
 };
 
 let seq = 0;
@@ -29,7 +27,7 @@ function input(over = {}) {
   return validateGenerateInput({ title: '세비야 타파스 맛집 바 알팔파', type: '맛집', content: '살모레호 맛있음', memo: '', info: '', volume: 'normal', images: [], clientRequestId: `req_test_${Date.now()}_${seq}`, ...over });
 }
 function deps(over = {}) {
-  return { db, bucket, ai: { client: createMockClient(), provider: 'mock' }, naver: null, logger: null, ...over };
+  return { db, ai: { client: createMockClient(), provider: 'mock' }, naver: null, logger: null, ...over };
 }
 async function newUser(uid) {
   await ensureUserProfile(db, { uid, email: `${uid}@x.com`, emailVerified: true });
@@ -113,13 +111,13 @@ for (const [marker, reason] of [['[[mock:error]]', 'ai_unavailable'], ['[[mock:o
       return true;
     });
     const u = await assertInvariant('u4');
-    assert.deepEqual([u.credits, u.activeGenerations, u.storageBytes], [2, 0, 0]);
+    assert.deepEqual([u.credits, u.activeGenerations], [2, 0]);
+    assert.equal(u.storageBytes, undefined, '사진 용량 집계 없음');
     const g = (await db.doc(`generations/${service.generationIdOf('u4', inp.clientRequestId)}`).get()).data();
     assert.equal(g.status, 'failed');
     assert.equal(g.charge.status, 'refunded');
     assert.equal(g.error.reason, reason);
-    const [files] = await bucket.getFiles({ prefix: 'users/u4/' });
-    assert.equal(files.length, 0, '실패 시 업로드 사진 삭제');
+    assert.ok(!/\/9j\/|data:image/.test(JSON.stringify(g)), '실패 기록에도 사진 데이터 없음');
     const l = await ledger('u4');
     assert.deepEqual(l.map((x) => x.type).sort(), ['generation', 'refund', 'signup_bonus']);
   });
@@ -142,17 +140,17 @@ test('⑤ 함수 중단(네트워크·인스턴스 종료)으로 processing 에 
   await service.reserve(db, { uid: 'u5', generationId: idB, input: b, imageBytes: 0, cfg: CFG, provider: 'mock', nowMs: now });
   assert.equal((await user('u5')).credits, 0);
   // lease 전: 아직 처리 중
-  assert.equal((await service.getStatus(db, bucket, { uid: 'u5', generationId: idA, nowMs: now + 1000 })).status, 'processing');
+  assert.equal((await service.getStatus(db, { uid: 'u5', generationId: idA, nowMs: now + 1000 })).status, 'processing');
   // lease 후 조회 → 즉시 복구
-  const s = await service.getStatus(db, bucket, { uid: 'u5', generationId: idA, nowMs: now + 361_000 });
+  const s = await service.getStatus(db, { uid: 'u5', generationId: idA, nowMs: now + 361_000 });
   assert.deepEqual([s.status, s.refunded, s.error.reason], ['failed', true, 'timeout_recovered']);
   // 나머지는 스케줄러가 복구
-  assert.equal(await service.sweepStale(db, bucket, now + 361_000), 1);
-  assert.equal(await service.sweepStale(db, bucket, now + 400_000), 0, '두 번 복구하지 않음');
+  assert.equal(await service.sweepStale(db, now + 361_000), 1);
+  assert.equal(await service.sweepStale(db, now + 400_000), 0, '두 번 복구하지 않음');
   const u = await assertInvariant('u5');
   assert.deepEqual([u.credits, u.activeGenerations], [2, 0]);
   // 다른 사용자는 조회 불가
-  await assert.rejects(service.getStatus(db, bucket, { uid: 'someone', generationId: idB, nowMs: now }), (e) => e.code === 'not-found');
+  await assert.rejects(service.getStatus(db, { uid: 'someone', generationId: idB, nowMs: now }), (e) => e.code === 'not-found');
 });
 
 test('⑥ 더블클릭: 같은 요청 5번 동시 전송 → 1번만 실행·차감', async () => {
@@ -195,22 +193,24 @@ test('⑦ 동시 실행 상한: 생성 중인 건이 있으면 추가 요청 거
   assert.deepEqual([u.credits, u.activeGenerations], [1, 0]);
 });
 
-test('⑧ 사진 여러 장: Storage 저장 + 분석 요청 + 본문 [사진N] 배치 + 용량 집계', async () => {
+test('⑧ 사진 여러 장: Claude 에 전달·본문 [사진N] 배치, 서버(Firestore)에는 사진·Base64 저장 안 함', async () => {
   await newUser('u8');
   const ai = createMockClient();
   const r = await service.generate(deps({ ai: { client: ai, provider: 'mock' } }), CFG, { uid: 'u8', input: input({ images: [JPEG, JPEG, JPEG] }) });
   assert.equal(ai.calls[0].messages[0].content.filter((c) => c.type === 'image').length, 3);
-  assert.equal(r.photos.length, 3);
+  assert.equal(r.imageCount, 3);
+  assert.equal(r.photos, undefined);
   for (let i = 1; i <= 3; i++) assert.ok(r.result.body.includes(`[사진${i}]`));
-  const [files] = await bucket.getFiles({ prefix: `users/u8/generations/${r.generationId}/` });
-  assert.equal(files.length, 3);
-  const [meta] = await files[0].getMetadata();
-  assert.equal(meta.contentType, 'image/jpeg');
-  const bytes = Buffer.from(JPEG.split(',')[1], 'base64').length;
-  assert.equal((await user('u8')).storageBytes, bytes * 3);
+  const g = (await db.doc(`generations/${r.generationId}`).get()).data();
+  for (const k of ['photos', 'photosState', 'photosExpireAt', 'photoBytesReserved']) assert.equal(g[k], undefined, k);
+  assert.equal(g.input.imageCount, 3);
+  const b64 = JPEG.split(',')[1].slice(0, 40);
+  const all = JSON.stringify(g) + JSON.stringify((await db.doc(`generationMetrics/${r.generationId}`).get()).data()) + JSON.stringify(await user('u8'));
+  assert.ok(!all.includes(b64) && !all.includes('data:image'), 'Firestore 에 사진 데이터 없음');
+  assert.equal((await user('u8')).storageBytes, undefined);
 });
 
-test('속도 제한(분당)·일일 한도·저장 용량 초과는 차감 없이 거부', async () => {
+test('속도 제한(분당)·일일 한도 초과는 차감 없이 거부', async () => {
   await newUser('u9');
   await adminAdjustCredits(db, { uid: 'u9', delta: 10, reason: '테스트', requestId: 'req_u9_setup', actorUid: 't' });
   const cfg = { ...CFG, rateLimitPerMinute: 2 };
@@ -222,8 +222,6 @@ test('속도 제한(분당)·일일 한도·저장 용량 초과는 차감 없�
   await service.generate({ ...deps(), now: () => t0 + 61_000 }, cfg, { uid: 'u9', input: input() });
   // 일일 한도 3
   await rejectsWith(service.generate({ ...deps(), now: () => t0 + 130_000 }, { ...CFG, dailyLimit: 3 }, { uid: 'u9', input: input() }), 'daily_limit');
-  // 용량
-  await rejectsWith(service.generate({ ...deps(), now: () => t0 + 200_000 }, { ...CFG, storageQuotaBytes: 10 }, { uid: 'u9', input: input({ images: [JPEG] }) }), 'storage_quota');
   const u = await assertInvariant('u9');
   assert.equal(u.credits, 12 - 3);
   assert.equal(u.usage.dayCount, 3);
@@ -246,16 +244,12 @@ test('토큰 사용량·예상 비용·서버 비용·품질 → generationMetri
   assert.equal(typeof m.latencyMs, 'number');
   assert.equal(typeof m.computeUsdEst, 'number');
   assert.ok(Array.isArray(m.qualityFlags));
-  assert.ok(m.photoBytes > 0);
+  assert.ok(m.imageBytesSent > 0, '요청 크기만 기록 (저장 아님)');
   for (const k of ['input', 'title', 'content', 'email']) assert.equal(m[k], undefined, `metrics 에 ${k} 없음`);
   const ops = (await db.doc(`opsDaily/${service.kstDay(Date.now())}`).get()).data();
   assert.ok(ops.succeeded >= 1 && ops.aiCostUsd > 0);
   assert.ok(ops.byModel['claude-sonnet-4-6'].count >= 1);
   assert.ok(!JSON.stringify(g).includes('sk-ant') && !JSON.stringify(m).includes('sk-ant'), '키 미기록');
-  // 사진 보관 만료일 = 생성 + 90일
-  assert.equal(g.photosState, 'stored');
-  const days = (g.photosExpireAt.toMillis() - Date.now()) / 86400000;
-  assert.ok(days > 89.9 && days <= 90.01, String(days));
 });
 
 test('실패한 호출의 비용 기록: 응답 전 오류=과금 없음(none), 응답 도중 끊김=부분 사용량(하한)', async () => {

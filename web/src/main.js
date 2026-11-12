@@ -6,6 +6,7 @@ import * as api from './api.js';
 import * as acct from './account.js';
 import * as P from './posts.js';
 import * as G from './generations.js';
+import * as B from './backup.js';
 import { addImg } from './images.js';
 import { show, switchTab as baseSwitchTab, anim, cpId, cpTags, cpAll, cpTxt } from './render.js';
 
@@ -241,20 +242,20 @@ function startLoading(msg) {
   switchTab('result');
 }
 
-/** 생성 결과(서버 응답 또는 generations 문서)를 화면에 표시 */
-async function showGeneration(gen, { localPhotos } = {}) {
+/** 생성 결과(서버 응답 / generations 문서 / 저장 글 / JSON)를 화면에 표시.
+ *  사진은 저장하지 않으므로, 생성 직후에만 브라우저 메모리의 사진(localPhotos)으로 미리보기.
+ *  다시 연 글은 본문 [사진N] 배치만 있고, 왼쪽에서 사진을 다시 첨부하면 미리보기에 표시된다. */
+function showGeneration(gen, { localPhotos, input } = {}) {
+  const inp = input || gen.input || null;
   state.resultData = gen.result;
-  state.resultMeta = { generationId: gen.generationId || gen.id, type: (gen.input && gen.input.type) || state.sT, photos: (gen.photos || []).map((p) => ({ path: p.path, index: p.index })) };
-  state.previewPhotos = localPhotos || [];
+  state.resultMeta = {
+    generationId: gen.generationId || gen.id || null,
+    type: (inp && inp.type) || state.sT,
+    input: inp,
+    createdAt: gen.createdAt && gen.createdAt.toDate ? gen.createdAt.toDate().toISOString() : (gen.createdAt || null),
+  };
+  state.previewPhotos = localPhotos || null;
   show(gen.result);
-  if (!localPhotos && state.resultMeta.photos.length) {
-    const meta = state.resultMeta;
-    const urls = await G.photoUrls(meta.photos);
-    if (state.resultMeta !== meta) return;
-    state.previewPhotos = urls; // 삭제된 사진은 null → 미리보기에서 빈 칸 표시
-    if (g('rightPreview').style.display !== 'none') renderPreview();
-    g('tabPreview').style.color = '#2d6a4f';
-  }
 }
 
 function finishWithFailure(gen) {
@@ -287,7 +288,7 @@ function trackGeneration(uid, generationId, { localPhotos } = {}) {
     stopWatch(); G.clearPending(uid); state.currentRequestId = null;
     if (doc.status === 'succeeded') {
       g('eb').className = 'err'; endLoading();
-      await showGeneration(doc, { localPhotos });
+      showGeneration(doc, { localPhotos });
     } else {
       finishWithFailure(doc);
     }
@@ -324,7 +325,8 @@ async function gen(ev) {
   const clientRequestId = state.currentRequestId || api.newRequestId();
   state.currentRequestId = clientRequestId;
   const generationId = uid + '_' + clientRequestId;
-  const localPhotos = state.imgs.slice();
+  const localPhotos = state.imgs.slice(); // 브라우저 메모리에만 — Claude 분석용으로 전송 후 서버에 저장되지 않음
+  const inputSnapshot = { title: t, memo: m, content: c, info, type: state.sT, volume: state.sV, imageCount: localPhotos.length };
   G.savePending(uid, { generationId, clientRequestId, startedAt: Date.now() });
   state.resultData = null;
   startLoading();
@@ -342,7 +344,7 @@ async function gen(ev) {
     G.clearPending(uid); state.currentRequestId = null;
     if (res.status === 'failed') { finishWithFailure(res); return; }
     endLoading();
-    await showGeneration(res, { localPhotos });
+    showGeneration(res, { localPhotos, input: inputSnapshot });
   } catch (e) {
     if (api.isDefinitiveError(e)) {
       G.clearPending(uid); state.currentRequestId = null; endLoading();
@@ -437,7 +439,7 @@ async function savePost() {
       type: (state.resultMeta && state.resultMeta.type) || state.sT,
       data: state.resultData,
       generationId: state.resultMeta && state.resultMeta.generationId,
-      photos: (state.resultMeta && state.resultMeta.photos) || [],
+      input: (state.resultMeta && state.resultMeta.input) || null,
     });
     btn.textContent = '✅ 저장됨!'; btn.style.background = '#388e3c'; btn.style.color = '#fff'; btn.style.borderColor = '#388e3c';
     setTimeout(() => { btn.textContent = '💾 저장'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }, 2000);
@@ -494,7 +496,7 @@ function renderSavedList() {
     const h = document.createElement('div'); h.style.cssText = 'font-size:14px;font-weight:700;color:#1a1a1a;line-height:1.5;margin-bottom:4px'; h.textContent = post.title;
     const meta = document.createElement('div'); meta.style.cssText = 'font-size:11px;color:#888';
     const date = post.legacySavedAt || (post.createdAt && post.createdAt.toDate ? post.createdAt.toDate().toLocaleString('ko-KR') : '');
-    meta.textContent = date + (post.type ? ' · ' + post.type : '') + (post.photos && post.photos.length ? ' · 📸 ' + post.photos.length + '장' : '');
+    meta.textContent = date + (post.type ? ' · ' + post.type : '') + (post.input && post.input.imageCount ? ' · 📸 사진 ' + post.input.imageCount + '장 배치' : '');
     titleDiv.appendChild(h); titleDiv.appendChild(meta); header.appendChild(titleDiv); card.appendChild(header);
 
     const bodyPrev = document.createElement('div');
@@ -515,7 +517,7 @@ function renderSavedList() {
     loadBtn.textContent = '📄 불러오기';
     loadBtn.onclick = () => {
       switchTab('result');
-      showGeneration({ id: post.generationId || null, result: data, input: { type: post.type }, photos: post.photos || [] });
+      showGeneration({ id: post.generationId || null, result: data, input: post.input || { type: post.type }, createdAt: post.createdAt });
     };
     const cpBtn = document.createElement('button');
     cpBtn.style.cssText = 'flex:1;padding:9px;background:#fff;color:#2d6a4f;border:1.5px solid #2d6a4f;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
@@ -533,9 +535,53 @@ function renderSavedList() {
   });
 }
 
+/* ── JSON 내보내기·불러오기 (무료 · 서버 호출 없음 · 사진/민감정보 제외) ── */
+function exportJson() {
+  if (!state.resultData) { alert('내보낼 글이 없어요!'); return; }
+  const meta = state.resultMeta || {};
+  const input = meta.input || { title: g('ti').value, memo: g('mi').value, content: g('ci').value, info: g('ii').value, type: state.sT, volume: state.sV };
+  const exp = B.buildExport({ input, result: state.resultData, createdAt: meta.createdAt || null });
+  const blob = new Blob([JSON.stringify(exp, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = B.exportFileName(exp);
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function importJson() {
+  if (state.inFlight) return;
+  g('jsonFile').value = '';
+  g('jsonFile').click();
+}
+function onJsonFile(e) {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  if (f.size > B.MAX_IMPORT_BYTES) { alert('파일이 너무 커요 (1MB 이하).'); return; }
+  const r = new FileReader();
+  r.onload = () => {
+    let d;
+    try { d = B.parseImport(String(r.result)); } catch (err) { alert('불러오기 실패: ' + err.message); return; }
+    // 입력값 복원 (사진은 복원하지 않음 — 필요하면 다시 첨부)
+    g('ti').value = d.input.title; g('mi').value = d.input.memo; g('ci').value = d.input.content; g('ii').value = d.input.info;
+    document.querySelectorAll('.tb').forEach((b) => b.classList.remove('on')); state.sT = '';
+    if (d.input.type) document.querySelectorAll('.tb').forEach((b) => { if (b.textContent.trim().endsWith(d.input.type)) st(b, d.input.type); });
+    document.querySelectorAll('.vb').forEach((b) => b.classList.remove('on')); state.sV = '';
+    const vi = { short: 0, normal: 1, long: 2 }[d.input.volume];
+    if (vi != null) sv(document.querySelectorAll('.vb')[vi], d.input.volume);
+    state.currentRequestId = null;
+    g('eb').className = 'err';
+    showGeneration({ id: null, result: d.result, createdAt: d.createdAt }, { input: d.input });
+    switchTab('result');
+    const notes = [d.note, d.imageCount ? `📸 사진 ${d.imageCount}장 배치 정보가 있어요. 사진은 파일에 포함되지 않으니 필요하면 왼쪽에서 다시 첨부해주세요.` : ''].filter(Boolean);
+    if (notes.length) alert('✅ 불러왔어요.\n' + notes.join('\n'));
+  };
+  r.onerror = () => alert('파일을 읽을 수 없어요.');
+  r.readAsText(f, 'utf-8');
+}
+
 /* ── HTML onclick 에서 쓰는 함수 노출 (기존 마크업 유지) ── */
 Object.assign(window, {
-  st, sv, gen, reset, savePost, switchTab, addImg, cpId, cpTags, cpAll,
+  st, sv, gen, reset, savePost, switchTab, addImg, cpId, cpTags, cpAll, exportJson, importJson, onJsonFile,
   openAccount, closeModal, loginGoogle, loginEmail, signupEmail, resetPw, resendVerify, checkVerified, logout, saveName, withdraw, adminCheck,
 });
 
