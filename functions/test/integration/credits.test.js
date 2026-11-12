@@ -23,26 +23,26 @@ async function creditsOf(uid) {
 
 test.beforeEach(clear);
 
-test('신규 인증 회원: 크레딧 2개 + 원장 1건', async () => {
+test('신규 인증 회원: 크레딧 5개(기본 설정) + 원장 1건', async () => {
   const r = await ensureUserProfile(db, { uid: 'u1', email: 'u1@x.com', emailVerified: true, displayName: '유저1' });
   assert.equal(r.created, true);
   assert.equal(r.granted, true);
-  assert.equal(r.credits, 2);
+  assert.equal(r.credits, 5);
   const u = (await db.doc('users/u1').get()).data();
-  assert.equal(u.credits, 2);
-  assert.deepEqual([u.freeCredits, u.paidCredits], [2, 0]);
+  assert.equal(u.credits, 5);
+  assert.deepEqual([u.freeCredits, u.paidCredits, u.plan], [5, 0, 'free']);
   assert.equal(u.signupBonus.status, 'granted');
   assert.equal(u.displayName, '유저1');
   const l = await ledgerOf('u1');
   assert.equal(l.length, 1);
   assert.equal(l[0].id, 'signup_bonus_u1');
-  assert.deepEqual([l[0].type, l[0].delta, l[0].balanceBefore, l[0].balanceAfter], ['signup_bonus', 2, 0, 2]);
+  assert.deepEqual([l[0].type, l[0].delta, l[0].balanceBefore, l[0].balanceAfter], ['signup_bonus', 5, 0, 5]);
 });
 
 test('중복 로그인: 여러 번 호출해도 1번만 지급', async () => {
   const user = { uid: 'u2', email: 'u2@x.com', emailVerified: true };
   for (let i = 0; i < 5; i++) await ensureUserProfile(db, user);
-  assert.equal(await creditsOf('u2'), 2);
+  assert.equal(await creditsOf('u2'), 5);
   assert.equal((await ledgerOf('u2')).length, 1);
 });
 
@@ -52,7 +52,7 @@ test('동시 요청: 20건 동시 호출해도 정확히 1번만 지급', async 
   const ok = results.filter((r) => r.status === 'fulfilled');
   assert.ok(ok.length >= 1, '최소 1건은 성공해야 함');
   assert.equal(ok.filter((r) => r.value.granted).length, 1, 'granted=true 는 정확히 1건');
-  assert.equal(await creditsOf('u3'), 2);
+  assert.equal(await creditsOf('u3'), 5);
   assert.equal((await ledgerOf('u3')).length, 1);
 });
 
@@ -78,9 +78,9 @@ test('이메일 미인증: 보류 → 인증 후 1번 지급', async () => {
   assert.equal(r1.signupBonusStatus, 'pending_verification');
   const r2 = await ensureUserProfile(db, { uid: 'u4', email: 'u4@x.com', emailVerified: true });
   assert.equal(r2.granted, true);
-  assert.equal(r2.credits, 2);
+  assert.equal(r2.credits, 5);
   await ensureUserProfile(db, { uid: 'u4', email: 'u4@x.com', emailVerified: true });
-  assert.equal(await creditsOf('u4'), 2);
+  assert.equal(await creditsOf('u4'), 5);
 });
 
 test('미인증 상태에서 다른 사람이 같은 이메일을 선점할 수 없음 (먼저 인증한 계정만 지급)', async () => {
@@ -105,12 +105,12 @@ test('재로그인 시 사용자가 바꾼 displayName 을 덮어쓰지 않음',
 test('관리자 조정: 원장 기록 + 멱등 + 음수 잔액 방지', async () => {
   await ensureUserProfile(db, { uid: 'u7', email: 'u7@x.com', emailVerified: true });
   const a = await adminAdjustCredits(db, { uid: 'u7', delta: 5, reason: 'CS 보상', requestId: 'req_00000001', actorUid: 'admin1' });
-  assert.deepEqual([a.applied, a.balanceAfter], [true, 7]);
+  assert.deepEqual([a.applied, a.balanceAfter], [true, 10]);
   const dup = await adminAdjustCredits(db, { uid: 'u7', delta: 5, reason: 'CS 보상', requestId: 'req_00000001', actorUid: 'admin1' });
-  assert.deepEqual([dup.applied, dup.duplicate, dup.balanceAfter], [false, true, 7]);
-  assert.equal(await creditsOf('u7'), 7);
-  await assert.rejects(adminAdjustCredits(db, { uid: 'u7', delta: -8, reason: '회수', requestId: 'req_00000002', actorUid: 'admin1' }), { code: 'failed-precondition' });
-  assert.equal(await creditsOf('u7'), 7);
+  assert.deepEqual([dup.applied, dup.duplicate, dup.balanceAfter], [false, true, 10]);
+  assert.equal(await creditsOf('u7'), 10);
+  await assert.rejects(adminAdjustCredits(db, { uid: 'u7', delta: -11, reason: '회수', requestId: 'req_00000002', actorUid: 'admin1' }), { code: 'failed-precondition' });
+  assert.equal(await creditsOf('u7'), 10);
   await assert.rejects(adminAdjustCredits(db, { uid: 'nobody', delta: 1, reason: 'x', requestId: 'req_00000003', actorUid: 'a' }), { code: 'not-found' });
   await assert.rejects(adminAdjustCredits(db, { uid: 'u7', delta: 1.5, reason: 'x', requestId: 'req_00000004', actorUid: 'a' }), { code: 'invalid-argument' });
   const l = await ledgerOf('u7');

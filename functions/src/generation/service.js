@@ -22,6 +22,7 @@ const { parseGeneration } = require('../ai/parse');
 const { checkResult } = require('../ai/validateResult');
 const { buildClaudeRequest, runClaude, classifyAiError, AiError } = require('../ai/claude');
 const { estimateCostUsd, estimateComputeUsd } = require('../config/pricing');
+const { resolveStyle } = require('../account/features');
 const { totalImageBytes } = require('../api/images');
 
 /** 사용자에게 보여줄 실패 메시지 (내부 정보·원문 오류는 노출하지 않음) */
@@ -55,6 +56,7 @@ function publicView(id, g) {
     result: g.result || null,
     naver: g.naver || null,
     imageCount: (g.input && g.input.imageCount) || 0,
+    style: g.style || null,
     error: g.error ? { reason: g.error.reason, message: g.error.message, retryable: !!g.error.retryable } : null,
     refunded: !!(g.charge && g.charge.status === 'refunded'),
     mock: g.provider === 'mock',
@@ -151,7 +153,7 @@ function writeMetricsInTx(tx, db, { generationId, g, status, aiMeta, failureReas
  * ① 예약: 1크레딧 차감 + generations 생성 (원자적)
  * @returns {Promise<{reserved:boolean, existing?:object}>}
  */
-async function reserve(db, { uid, generationId, input, imageBytes = 0, cfg, provider, nowMs }) {
+async function reserve(db, { uid, generationId, input, imageBytes = 0, cfg, provider, nowMs, style = null }) {
   const userRef = db.collection(COL.USERS).doc(uid);
   const genRef = db.collection(COL.GENERATIONS).doc(generationId);
   return db.runTransaction(async (tx) => {
@@ -206,6 +208,7 @@ async function reserve(db, { uid, generationId, input, imageBytes = 0, cfg, prov
         volume: input.volume, imageCount: input.images.length,
       },
       imageBytesSent: imageBytes,
+      style, // 작성 스타일 스냅샷 (이력·JSON 에서 복원)
       result: null,
       naver: null,
       provider,
@@ -230,7 +233,7 @@ async function finalize(db, { uid, generationId, result, naver, aiMeta, nowMs })
     const g = genSnap.data();
     if (!g || g.status !== GENERATION_STATUS.PROCESSING) return { finalized: false, status: g && g.status };
     const u = userSnap.data() || {};
-    const quality = checkResult(result, { volume: g.input.volume, imageCount: g.input.imageCount });
+    const quality = checkResult(result, { volume: g.input.volume, imageCount: g.input.imageCount, style: g.style || null });
     tx.update(genRef, {
       status: GENERATION_STATUS.SUCCEEDED,
       result,
@@ -348,8 +351,10 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
   // 같은 요청의 재전송이면 게이트와 무관하게 기존 결과를 돌려준다
   const prev = await db.collection(COL.GENERATIONS).doc(generationId).get();
   if (!prev.exists) await checkServiceGate(db, cfg, now(), { cacheMs: deps.gateCacheMs, caller });
+  // 작성 스타일 확인 (차감 전 — 남의 스타일·없는 스타일이면 거부)
+  const style = prev.exists ? (prev.data().style || null) : await resolveStyle(db, uid, input.style);
 
-  const res = await reserve(db, { uid, generationId, input, imageBytes, cfg, provider: ai.provider, nowMs: now() });
+  const res = await reserve(db, { uid, generationId, input, imageBytes, cfg, provider: ai.provider, nowMs: now(), style });
   if (!res.reserved) {
     // 같은 요청이 이미 있음 (더블클릭/재전송) → 추가 차감 없이 현재 상태 반환
     return { ...(await getStatus(db, { uid, generationId, nowMs: now() })), duplicate: true };
@@ -368,7 +373,7 @@ async function generate(deps, cfg, { uid, input, onChunk, caller }) {
       send({ type: 'status', message: naver ? `✅ ${naver.name} 정보 찾음!` : 'ℹ️ 네이버 검색 결과 없음 — Claude가 웹 검색으로 대체합니다' });
     }
 
-    const prompt = buildPrompt({ ...input, info: mergePlaceInfo(input.info, naver), imageCount: input.images.length });
+    const prompt = buildPrompt({ ...input, info: mergePlaceInfo(input.info, naver), imageCount: input.images.length }, style);
     const params = buildClaudeRequest({
       model: cfg.model,
       maxTokens: cfg.maxTokens,

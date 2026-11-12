@@ -128,45 +128,49 @@ test('관리자: 모든 사용자 데이터 읽기 가능, 잔액·원장·주�
 });
 
 // ── posts ──
-test('posts: 본인 글 CRUD, 타인 글 접근 불가', async () => {
+test('posts: 본인 글만 읽기, 쓰기·수정·삭제는 클라이언트 불가 (저장 개수 제한을 서버에서만 적용)', async () => {
   const db = alice();
-  const ref = doc(db, 'posts/new1');
-  const post = { uid: 'alice', title: '새 글', type: '카페', data: { body: '본문', hashtags: ['#a'] }, generationId: null, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
-  await assertSucceeds(setDoc(ref, post));
-  await assertSucceeds(getDoc(ref));
+  const base = { uid: 'alice', title: 't', data: { body: '본문' }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  await assertSucceeds(getDoc(doc(db, 'posts/pa')));
   await assertSucceeds(getDocs(query(collection(db, 'posts'), where('uid', '==', 'alice'))));
   await assertFails(getDocs(collection(db, 'posts')));
-  await assertSucceeds(updateDoc(ref, { title: '수정', updatedAt: serverTimestamp() }));
-  await assertFails(getDoc(doc(bob(), 'posts/new1')));
-  await assertFails(updateDoc(doc(bob(), 'posts/new1'), { title: 'x', updatedAt: serverTimestamp() }));
-  await assertFails(deleteDoc(doc(bob(), 'posts/new1')));
-  await assertSucceeds(deleteDoc(ref));
+  await assertFails(getDoc(doc(bob(), 'posts/pa')));
+  await assertFails(setDoc(doc(db, 'posts/new1'), base));
+  await assertFails(addDoc(collection(db, 'posts'), base));
+  await assertFails(updateDoc(doc(db, 'posts/pa'), { title: '수정', updatedAt: serverTimestamp() }));
+  await assertFails(deleteDoc(doc(db, 'posts/pa')));
+  await assertFails(setDoc(doc(db, 'posts/legacy_alice_1'), { ...base, legacyId: 1 }));
 });
-test('posts: 스키마 위반 거부 (타인 uid, uid 변경, 임의 필드, createdAt 위조)', async () => {
+
+test('styles: 본인 스타일만 읽기, 쓰기 불가 / exportGrants: 접근 불가', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await setDoc(doc(ctx.firestore(), 'styles/s1'), { uid: 'alice', name: '내 스타일', greeting: '안녕' });
+    await setDoc(doc(ctx.firestore(), 'exportGrants/alice_r1'), { uid: 'alice' });
+  });
+  await assertSucceeds(getDoc(doc(alice(), 'styles/s1')));
+  await assertSucceeds(getDocs(query(collection(alice(), 'styles'), where('uid', '==', 'alice'))));
+  await assertFails(getDoc(doc(bob(), 'styles/s1')));
+  await assertFails(setDoc(doc(alice(), 'styles/s2'), { uid: 'alice', name: 'x' }));
+  await assertFails(updateDoc(doc(alice(), 'styles/s1'), { greeting: '변경' }));
+  await assertFails(deleteDoc(doc(alice(), 'styles/s1')));
+  await assertFails(getDoc(doc(alice(), 'exportGrants/alice_r1')));
+  await assertFails(setDoc(doc(alice(), 'exportGrants/alice_r2'), { uid: 'alice' }));
+});
+
+test('users: 회원 등급·사용량 카운터는 클라이언트가 변경 불가', async () => {
   const db = alice();
-  const base = { uid: 'alice', title: 't', data: {}, createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
-  await assertFails(setDoc(doc(db, 'posts/x1'), { ...base, uid: 'bob' }));
-  await assertFails(setDoc(doc(db, 'posts/x2'), { ...base, credits: 100 }));
-  await assertFails(setDoc(doc(db, 'posts/x3'), { ...base, createdAt: new Date(2000, 1, 1) }));
-  await assertFails(setDoc(doc(db, 'posts/x4'), { ...base, title: 'x'.repeat(301) }));
-  await assertFails(setDoc(doc(db, 'posts/x5'), { ...base, data: 'not-a-map' }));
-  await assertFails(updateDoc(doc(db, 'posts/pa'), { uid: 'bob', updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(doc(db, 'posts/pa'), { createdAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  // 로컬 저장 글 이전(legacy): 존재하지 않는 자기 legacy ID 만 조회 가능
-  await assertSucceeds(getDoc(doc(db, 'posts/legacy_alice_1700000000000')));
-  await assertFails(getDoc(doc(db, 'posts/legacy_bob_1700000000000')));
-  await assertFails(getDoc(doc(db, 'posts/random_missing')));
-  await assertFails(getDoc(doc(db, 'posts/legacy_alice_x')).then(() => getDoc(doc(bob(), 'posts/pa'))));
-  // 사진 미저장: 입력값(텍스트)만 허용, 사진 경로·사진 배열·본문 Base64 거부
-  const inp = { title: '제목', memo: '', content: '내용', info: '', type: '맛집', volume: 'normal', imageCount: 3 };
-  await assertSucceeds(setDoc(doc(db, 'posts/p_input'), { ...base, data: { body: '본문 [사진1] [사진2] [사진3]' }, input: inp }));
-  await assertFails(setDoc(doc(db, 'posts/p_photos'), { ...base, photos: [{ path: 'users/alice/generations/g/photo_1.jpg', index: 1 }] }));
-  await assertFails(setDoc(doc(db, 'posts/p_imgs'), { ...base, input: { ...inp, images: ['data:image/jpeg;base64,AAAA'] } }));
-  await assertFails(setDoc(doc(db, 'posts/p_b64'), { ...base, data: { body: '본문 data:image/jpeg;base64,/9j/AAAA' } }));
-  await assertFails(setDoc(doc(db, 'posts/p_cnt'), { ...base, input: { ...inp, imageCount: 11 } }));
-  await assertFails(setDoc(doc(db, 'posts/p_vol'), { ...base, input: { ...inp, volume: 'huge' } }));
-  // 로컬 저장 글 이전(legacy) 형식 허용
-  await assertSucceeds(setDoc(doc(db, 'posts/legacy_alice_1700000000000'), { ...base, legacyId: 1700000000000, legacySavedAt: '2024. 1. 1. 오후 3:00:00' }));
+  for (const f of [{ plan: 'pro' }, { exportCount: 0 }, { savedPostCount: 0 }, { styleCount: 0 }, { upgradedAt: serverTimestamp() }, { freeCredits: 99 }, { paidCredits: 99 }]) {
+    await assertFails(updateDoc(doc(db, 'users/alice'), { ...f, updatedAt: serverTimestamp() }));
+  }
+});
+
+test('config/policy: 누구나 읽기(화면 안내용), 관리자만 유효한 값으로 쓰기', async () => {
+  await assertSucceeds(getDoc(doc(anon(), 'config/policy')));
+  await assertFails(setDoc(doc(alice(), 'config/policy'), { signupBonusCredits: 100 }));
+  await assertSucceeds(setDoc(doc(admin(), 'config/policy'), { signupBonusCredits: 3, freeExportLimit: 5, freeSavedPostLimit: 5, freeStyleLimit: 1 }));
+  await assertFails(setDoc(doc(admin(), 'config/policy'), { signupBonusCredits: 1000 }));
+  await assertFails(setDoc(doc(admin(), 'config/policy'), { signupBonusCredits: 2.5 }));
+  await assertFails(setDoc(doc(admin(), 'config/policy'), { unknown: 1 }));
 });
 
 test('운영 컬렉션(비용·탈퇴기록·설정): 일반 사용자 읽기/쓰기 불가, 관리자 읽기만 (config/service 는 관리자 쓰기)', async () => {

@@ -1,4 +1,6 @@
-// 스테이징 종합 점검 — 배포된 스테이징의 실제 Claude·Firestore 로 크레딧·사진 분석·사진 미저장·탈퇴 시나리오 확인
+// 스테이징 종합 점검 — 배포된 스테이징의 실제 Claude·Firestore 로 크레딧·사진 분석·사진 미저장·FREE/PRO 한도·탈퇴 시나리오 확인
+//   가입 무료 크레딧은 운영 설정(config/policy, 기본 5)대로 지급되는지 확인한 뒤, 실제 Claude 호출 수를 줄이기 위해
+//   테스트 계정의 잔액만 관리자 조정(원장 기록)으로 2개로 맞춘다 — 운영 설정·다른 회원 데이터는 바꾸지 않음
 //
 //   에뮬레이터(점검 스크립트 자체 검증, Claude=mock):
 //     npx firebase emulators:exec --project demo-jaeinit --only auth,firestore,functions "node scripts/staging-check.mjs --emulator"
@@ -49,6 +51,8 @@ const adb = getFirestore(adminApp);
 const aauth = getAuth(adminApp);
 const credits = fnRequire('./src/lib/credits');
 const { deleteAccountData } = fnRequire('./src/account/deleteAccount');
+const features = fnRequire('./src/account/features');
+const { getPolicy } = fnRequire('./src/config/policy');
 const { png } = fnRequire('./test/fixtures/images');
 
 // ── 클라이언트 SDK (실제 사용자와 같은 경로) ──
@@ -111,9 +115,17 @@ try {
   const A = await clientFor(emailA, 'A');
   const B = await clientFor(emailB, 'B');
 
-  // 1) 가입 무료 2크레딧
+  // 1) 가입 무료 크레딧 = 운영 설정값 (기본 5), FREE 등급
+  const policy = await getPolicy(adb);
   const p = await A.call('ensureUserProfile', {});
-  assert.equal(p.credits, 2); log(true, '가입 시 무료 크레딧 2개', { credits: p.credits });
+  const pa = (await adb.doc(`users/${A.uid}`).get()).data();
+  assert.equal(p.credits, policy.signupBonusCredits); assert.equal(pa.plan, 'free');
+  log(true, `가입 시 무료 크레딧 ${policy.signupBonusCredits}개 (운영 설정값), FREE 등급`, { credits: p.credits });
+  // 테스트 계정만 잔액 2개로 조정 (관리자 조정 원장 기록 — 실제 Claude 호출 횟수 절약)
+  if (p.credits !== 2) {
+    await credits.adminAdjustCredits(adb, { uid: A.uid, delta: 2 - p.credits, reason: 'staging-check 테스트 계정 잔액 조정', requestId: `stg_${runId}_0`, actorUid: 'staging-check' });
+    log(true, `테스트 계정 잔액 ${p.credits} → 2 (관리자 조정·원장 기록, 운영 설정 변경 없음)`);
+  }
 
   // 2) 텍스트 + 웹 검색 (짧은 글) → 1개
   const g1 = await A.call('generatePost', base({ clientRequestId: req(1) }));
@@ -176,19 +188,55 @@ try {
   let otherDenied = false; try { await B.call('getGenerationStatus', { generationId: g2.generationId }); } catch (e) { otherDenied = e.code === 'functions/not-found'; }
   assert.ok(otherDenied); log(true, `생성 이력 ${hist.size}건 조회·상태 복구, 다른 회원 조회 차단`);
 
-  // 11) 글 저장(무료): 텍스트 결과·입력값만, 사진 없음 → 다시 열기
+  // 11) 글 저장(크레딧 없음, 서버 savePost): 텍스트 결과·입력값만, 사진 없음 → 다시 열기 / 클라이언트 직접 쓰기 거부
   const before = (await adb.doc(`users/${A.uid}`).get()).data().credits;
-  const post = await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: g2.result.title_1, type: '카페', data: g2.result, generationId: g2.generationId,
-    input: { title: '제주 애월 카페 | 오션뷰 디저트 후기', memo: '', content: '통창 바다뷰', info: '', type: '카페', volume: 'normal', imageCount: photos.length }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  const sv = await A.call('savePost', { generationId: g2.generationId, title: g2.result.title_1, type: '카페', data: g2.result,
+    input: { title: '제주 애월 카페 | 오션뷰 디저트 후기', memo: '', content: '통창 바다뷰', info: '', type: '카페', volume: 'normal', imageCount: photos.length } });
+  assert.equal(sv.created, true);
+  const sv2 = await A.call('savePost', { generationId: g2.generationId, data: { ...g2.result, body: g2.result.body + '\n(수정)' } });
+  assert.equal(sv2.created, false); assert.equal(sv2.savedPostCount, 1);
   const reopened = await getDocs(query(collection(A.fs, 'posts'), where('uid', '==', A.uid)));
-  const pd = reopened.docs.find((d) => d.id === post.id).data();
+  const pd = reopened.docs.find((d) => d.id === sv.postId).data();
   assert.ok(pd.data.body.includes('[사진1]')); assert.equal(pd.photos, undefined); assert.equal(pd.input.imageCount, photos.length);
   let rejected = false;
-  try { await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: 'x', data: { body: 'a ' + photos[0] }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }); } catch (e) { rejected = true; }
-  assert.ok(rejected, '본문에 사진 데이터가 섞인 저장은 규칙이 거부');
+  try { await addDoc(collection(A.fs, 'posts'), { uid: A.uid, title: 'x', data: { body: 'a' }, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }); } catch (e) { rejected = true; }
+  assert.ok(rejected, '클라이언트 직접 저장은 규칙이 거부 (저장 한도 우회 불가)');
+  const sv3 = await A.call('savePost', { clientSaveId: `save_${runId}_img`, data: { title_1: 't', body: 'a ' + photos[0] } });
+  const d3 = (await adb.doc(`posts/${sv3.postId}`).get()).data();
+  assert.ok(!JSON.stringify(d3).includes('data:image'), '본문에 섞인 사진 데이터는 서버가 제거');
   assert.equal((await adb.doc(`users/${A.uid}`).get()).data().credits, before);
-  log(true, '글 저장·다시 열기 무료, [사진N] 배치 유지·사진 데이터 없음, 사진 섞인 저장 거부');
-  await deleteDoc(doc(A.fs, 'posts', post.id));
+  log(true, '글 저장(서버)·수정 저장(개수 그대로)·다시 열기 크레딧 없음, [사진N] 배치 유지·사진 데이터 제거, 직접 쓰기 거부');
+
+  // 11-2) FREE 한도: 저장 글·JSON 내보내기·작성 스타일 (AI 호출 없음)
+  for (let i = 2; i < policy.freeSavedPostLimit; i++) await A.call('savePost', { clientSaveId: `save_${runId}_${i}`, data: { title_1: 't' + i, body: 'b' } });
+  let lim = null; try { await A.call('savePost', { clientSaveId: `save_${runId}_over`, data: { title_1: 'x', body: 'b' } }); } catch (e) { lim = e.details && e.details.reason; }
+  assert.equal(lim, 'saved_post_limit');
+  await A.call('deletePost', { postId: sv3.postId });
+  await A.call('savePost', { clientSaveId: `save_${runId}_over`, data: { title_1: 'x', body: 'b' } });
+  log(true, `FREE 저장 ${policy.freeSavedPostLimit}개 → 초과 차단, 삭제 후 다시 저장 가능`);
+  const ex0 = await A.call('authorizeExport', { requestId: `exp_${runId}_1` });
+  const exDup = await A.call('authorizeExport', { requestId: `exp_${runId}_1` });
+  assert.equal(exDup.duplicate, true); assert.equal(exDup.exportCount, ex0.exportCount);
+  for (let i = 2; i <= policy.freeExportLimit; i++) await A.call('authorizeExport', { requestId: `exp_${runId}_${i}` });
+  let exLim = null; try { await A.call('authorizeExport', { requestId: `exp_${runId}_over` }); } catch (e) { exLim = e.details && e.details.reason; }
+  assert.equal(exLim, 'export_limit');
+  log(true, `FREE JSON 내보내기 누적 ${policy.freeExportLimit}회 → 초과 차단, 재전송은 1회로 집계`);
+  await A.call('saveStyle', { name: '점검 스타일', blogName: '점검 블로그', greeting: '안녕하세요 점검입니다' });
+  let stLim = null; try { await A.call('saveStyle', { name: '둘째' }); } catch (e) { stLim = e.details && e.details.reason; }
+  assert.equal(stLim, policy.freeStyleLimit <= 1 ? 'style_limit' : null);
+  log(true, `FREE 작성 스타일 ${policy.freeStyleLimit}개 → 초과 차단`);
+
+  // 11-3) PRO: 관리자 테스트 설정(실제 결제 아님) → 한도 해제, 잔액 0 이어도 PRO 유지 / 회원은 등급·카운터 변경 불가
+  let selfUp = false;
+  try { const { updateDoc } = await import('firebase/firestore'); await updateDoc(doc(A.fs, 'users', A.uid), { plan: 'pro', exportCount: 0 }); selfUp = true; } catch (e) { /* 규칙이 거부 */ }
+  assert.equal(selfUp, false, '회원이 등급·사용량을 직접 바꿀 수 없음');
+  await features.adminSetPlan(adb, { uid: A.uid, plan: 'pro', reason: 'staging-check 테스트 계정', actorUid: 'staging-check' });
+  const exPro = await A.call('authorizeExport', { requestId: `exp_${runId}_pro` });
+  const svPro = await A.call('savePost', { clientSaveId: `save_${runId}_pro`, data: { title_1: 'p', body: 'b' } });
+  assert.equal(exPro.allowed, true); assert.equal(svPro.limit, null);
+  const pu = (await adb.doc(`users/${A.uid}`).get()).data();
+  assert.equal(pu.plan, 'pro'); assert.equal(pu.credits, 0);
+  log(true, 'PRO(관리자 테스트 설정): 내보내기·저장 한도 해제, 잔액 0 이어도 PRO 유지, 회원 직접 변경 불가');
 
   // 12) 비용 (관리자 전용 지표)
   const metrics = [];
@@ -202,8 +250,10 @@ try {
   await A.call('deleteAccount', { confirm: '탈퇴' });
   assert.equal((await adb.doc(`users/${A.uid}`).get()).exists, false);
   assert.equal((await adb.collection('generations').where('uid', '==', A.uid).get()).size, 0);
+  assert.equal((await adb.collection('posts').where('uid', '==', A.uid).get()).size, 0);
+  assert.equal((await adb.collection('styles').where('uid', '==', A.uid).get()).size, 0);
   let gone = false; try { await aauth.getUser(A.uid); } catch (e) { gone = e.code === 'auth/user-not-found'; }
-  assert.ok(gone); log(true, '회원 탈퇴 → Auth 계정·글·생성 기록 삭제');
+  assert.ok(gone); log(true, '회원 탈퇴 → Auth 계정·글·생성 기록·스타일 삭제');
   userA = null;
 
   mkdirSync(join(ROOT, 'cost-reports'), { recursive: true });
@@ -212,7 +262,7 @@ try {
   console.log(`\n✅ 스테이징 점검 통과 (${steps.length}개 확인) — 결과: ${out}`);
   await Promise.all([deleteApp(A.app), deleteApp(B.app)]);
 } catch (e) {
-  log(false, `실패: ${e.message}`);
+  log(false, `실패: ${e.message}`); console.error(e.stack);
   process.exitCode = 1;
 } finally {
   // 정리: 테스트 계정·설정 원복

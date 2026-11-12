@@ -28,9 +28,11 @@ async function invariant(uid) {
   assert.equal(u.credits, u.freeCredits + u.paidCredits);
   return u;
 }
+// 이 파일의 시나리오는 "가입 무료 2크레딧" 기준 — 운영 설정(config/policy)으로 2개를 지정해 유지 (기본값 5 검증은 features.test.js)
 test.beforeEach(async () => {
   await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/emulator/v1/projects/demo-jaeinit/databases/(default)/documents`, { method: 'DELETE' });
-  service.resetGateCache();
+  await db.doc('config/policy').set({ signupBonusCredits: 2 });
+  if (service.resetGateCache) service.resetGateCache();
 });
 
 test('이중 환급 방지: 함수 중단 건에 조회·스케줄러·실패처리가 동시에 복구를 시도해도 환급 1회', async () => {

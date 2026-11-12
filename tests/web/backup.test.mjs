@@ -1,7 +1,7 @@
 // JSON 내보내기·불러오기 단위 테스트 — npm run test:web
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildExport, parseImport, photoLayout, exportFileName, stripImageData, BACKUP_FORMAT } from '../../web/src/backup.js';
+import { buildExport, parseImport, photoLayout, exportFileName, stripImageData, BACKUP_FORMAT, cleanStyle } from '../../web/src/backup.js';
 
 const IMG = 'data:image/jpeg;base64,' + 'A'.repeat(5000);
 const RESULT = {
@@ -18,7 +18,8 @@ test('내보내기: 명세 항목만 포함, 사진·민감정보·내부 ID 없
   assert.deepEqual(Object.keys(e.input).sort(), ['content', 'imageCount', 'info', 'memo', 'title', 'type', 'volume']);
   assert.equal(e.result.credits, undefined);
   assert.deepEqual(e.result.hashtags, ['#세비야', '#맛집']);
-  assert.equal(e.style.preset, 'jaeinit_v3');
+  assert.deepEqual(e.style, { preset: 'basic', name: '기본 스타일' }, '스타일 미지정 시 기본 스타일');
+  assert.equal(e.version, 3);
   assert.equal(e.createdAt, '2026-11-12T01:00:00.000Z');
   assert.deepEqual([e.photoLayout.count, e.photoLayout.maxIndex], [2, 2]);
   assert.deepEqual(e.photoLayout.markers.map((m) => [m.marker, m.line]), [['[사진1]', 2], ['[사진2]', 5]]);
@@ -76,4 +77,44 @@ test('불러오기: 잘못된 파일 거부', () => {
 test('photoLayout: 번호 없는 [사진] 도 위치 기록', () => {
   const l = photoLayout('a\\n[사진]\\nb\\n[사진3]');
   assert.deepEqual([l.count, l.maxIndex], [2, 3]);
+});
+
+test('v3: 작성 스타일 스냅샷 왕복 (허용 필드만, 내부 ID·uid 제외)', () => {
+  const style = { preset: 'custom', name: '내 여행', blogName: '여행하는 곰', greeting: '안녕하세요 곰입니다', closing: '감사합니다', tone: 'emotional', useEmoji: false, extra: '표로 정리', id: 'styleDoc1', uid: 'u1', createdAt: 'x' };
+  const e = buildExport({ input: INPUT, result: RESULT, style });
+  assert.deepEqual(Object.keys(e.style).sort(), ['blogName', 'closing', 'extra', 'greeting', 'name', 'preset', 'tone', 'useEmoji']);
+  const json = JSON.stringify(e);
+  for (const bad of ['styleDoc1', '"uid"', 'u1']) assert.ok(!json.includes(bad), bad);
+  const r = parseImport(json);
+  assert.deepEqual(r.style, e.style);
+  assert.deepEqual(cleanStyle({ preset: 'jaeinit', blogName: 'x' }), { preset: 'jaeinit', name: '잰잇 스타일 (기존)' });
+  assert.equal(cleanStyle({ preset: 'custom', tone: 'evil' }).tone, 'friendly');
+});
+
+test('v2 백업 호환: jaeinit_v3 스타일 → 잰잇 프리셋', () => {
+  const v2 = { format: BACKUP_FORMAT, version: 2, exportedAt: '2026-11-01T00:00:00Z', createdAt: null, style: { preset: 'jaeinit_v3', label: '잰잇' }, input: INPUT, result: RESULT };
+  const r = parseImport(JSON.stringify(v2));
+  assert.equal(r.source, 'backup');
+  assert.deepEqual(r.style, { preset: 'jaeinit', name: '잰잇 스타일 (기존)' });
+  assert.equal(r.input.title, INPUT.title);
+});
+
+test('불러오기: 악성 HTML·회원 등급·사용량·크레딧 필드 제거, 손상된 구조 거부', () => {
+  const evil = {
+    format: BACKUP_FORMAT, version: 3, plan: 'pro', exportCount: 0, savedPostCount: 0, credits: 999, admin: true, idToken: 't',
+    input: { ...INPUT, title: '<img src=x onerror=alert(1)>제목', plan: 'pro' },
+    result: { ...RESULT, body: '<script>alert(1)</script>본문 <b>굵게</b> 가격 < 만원', title_1: { toString: 1 } },
+    style: { preset: 'custom', name: '<svg onload=alert(1)>스타일' },
+  };
+  const r = parseImport(JSON.stringify(evil));
+  const json = JSON.stringify(r);
+  for (const bad of ['<script', 'onerror', '<svg', '<b>', '"plan"', 'exportCount', 'savedPostCount', 'credits', 'admin', 'idToken']) assert.ok(!json.includes(bad), bad);
+  assert.equal(r.input.title, '제목');
+  assert.ok(r.result.body.includes('가격 < 만원'), '태그가 아닌 부등호는 유지');
+  assert.equal(r.result.title_1, '', '객체 값은 문자열로 받지 않음');
+  assert.equal(r.style.name, '스타일');
+  assert.throws(() => parseImport(JSON.stringify({ ...evil, result: { ...RESULT, hashtags: '#a' } })), /해시태그/);
+  assert.throws(() => parseImport('{"format":"jaeinit-blog-studio","result":'), /JSON 형식/);
+  assert.throws(() => parseImport(JSON.stringify([[1]])), /불러올 수 없는/);
+  assert.throws(() => parseImport(JSON.stringify({ hello: 1 })), /잰잇 블로그 스튜디오 JSON/);
 });

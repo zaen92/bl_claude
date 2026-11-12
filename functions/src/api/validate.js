@@ -29,7 +29,19 @@ function validateGenerateInput(data) {
     volume: data.volume,
     images: [],
     clientRequestId: data.clientRequestId,
+    style: null,
   };
+  // 작성 스타일: { preset: 'jaeinit'|'basic' } 또는 { styleId } (서버가 본인 스타일인지 확인)
+  if (data.style != null) {
+    const st = data.style;
+    if (typeof st !== 'object') throw new Error('작성 스타일 형식이 올바르지 않아요.');
+    if (st.styleId != null) {
+      if (typeof st.styleId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(st.styleId)) throw new Error('작성 스타일 형식이 올바르지 않아요.');
+      out.style = { styleId: st.styleId };
+    } else {
+      out.style = { preset: st.preset === 'jaeinit' ? 'jaeinit' : 'basic' };
+    }
+  }
   if (!POST_TYPES.includes(out.type)) throw new Error('글 유형을 선택해주세요.');
   if (!VOLUMES.includes(out.volume)) throw new Error('분량을 선택해주세요.');
   if (typeof out.clientRequestId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(out.clientRequestId)) throw new Error('clientRequestId 가 필요해요.');

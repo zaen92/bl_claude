@@ -15,6 +15,10 @@
 | `deleteAccount` | ✅ STEP 2.5 회원 탈퇴 | 로그인 + 최근 10분 내 로그인 |
 | `onAuthUserDeleted` | ✅ STEP 2.5 (Auth 삭제 트리거, 데이터 정리) | 시스템 |
 | `adminCheckAiConfig` | ✅ STEP 2.5 키·모델·웹검색 점검 (생성 비용 없음, 키 값 미반환) | admin |
+| `savePost` / `deletePost` | ✅ 계정 글 저장·수정·삭제 (FREE 개수 제한, 크레딧 없음) | 로그인 |
+| `authorizeExport` | ✅ 앱 내 JSON 내보내기 승인 (FREE 누적 횟수 제한, 크레딧 없음) | 로그인 |
+| `saveStyle` / `deleteStyle` | ✅ 개인화 작성 스타일 (FREE 개수 제한, 크레딧 없음) | 로그인 |
+| `adminSetPlan` | ✅ 테스트용 등급 변경 (실제 결제 아님, `planSource='admin_test'`) | admin |
 | `createOrder` / `confirmPayment` / `tossWebhook` | ⬜ STEP 3 (인터페이스만) | |
 
 ---
@@ -23,7 +27,8 @@
 요청
 ```json
 { "title": "...", "type": "맛집", "content": "...", "memo": "", "info": "", "volume": "normal",
-  "images": ["data:image/jpeg;base64,..."], "clientRequestId": "req_9f2c..." }
+  "images": ["data:image/jpeg;base64,..."], "clientRequestId": "req_9f2c...",
+  "style": { "styleId": "내 스타일 문서 ID" } }
 ```
 | 검증 | 한도 |
 |---|---|
@@ -31,6 +36,7 @@
 | 유형 · 분량 | 9종 · short/normal/long |
 | 사진 | 최대 10장, JPEG/PNG/WebP dataURL, 장당 ≤약 1.5MB, 합계 ≤약 9MB (클라이언트가 1400px·JPEG 82%로 압축) — **Claude 분석용으로만 전달, 서버에 저장하지 않음** |
 | clientRequestId | `[A-Za-z0-9_-]{8,64}` — 멱등 키 |
+| style (선택) | `{styleId}`(본인 스타일만 — 남의 ID 는 `style_not_found`, 차감 전 거부) 또는 `{preset:'basic'\|'jaeinit'}`. 없으면 `basic`(특정 블로그 이름·인사말 없음). `jaeinit` = 기존 v3 프롬프트 그대로. 생성 기록에 스냅샷 저장 |
 
 ### 처리 순서 (`functions/src/generation/service.js`)
 1. 인증 + 이메일 인증 확인 (토큰 → 필요 시 Admin Auth 재확인), 입력 검증, API 키 설정 확인(없으면 **차감 전** 거부), 서비스 게이트(일시중지·일일 비용 상한, 차감 전)
@@ -75,7 +81,29 @@
 클라이언트는 새로고침·네트워크 끊김 후 이 함수 + Firestore `generations/{id}` 실시간 구독으로 결과를 이어받는다.
 
 ## ensureUserProfile ✅ (STEP 1)
-요청 `{}` → `{ created, granted, credits, signupBonusStatus, signupBonusReason }`. 가입 보너스는 `freeCredits` 로 적립.
+요청 `{}` → `{ created, granted, credits, signupBonusStatus, signupBonusReason, signupBonusAmount }`. 가입 보너스는 `freeCredits` 로 적립.
+지급량은 **트랜잭션 안에서 읽은 `config/policy.signupBonusCredits`**(기본 5) — 설정 변경은 이후 신규 가입자에게만 적용. 신규 문서는 `plan:'free'`, 사용량 카운터 0.
+
+## savePost / deletePost ✅
+요청 (셋 중 하나로 문서 결정)
+```json
+{ "postId": "기존 글 수정", "generationId": "uid_req_... (같은 생성 결과 = 같은 글)", "clientSaveId": "save_xxxxxxxx (재전송해도 1개)",
+  "title": "...", "type": "맛집", "data": { /* GenerationResult */ }, "input": { /* 텍스트 입력값 */ }, "style": { /* 스냅샷 */ } }
+```
+응답 `{ postId, created, savedPostCount, limit (PRO 는 null), plan }`. 새 글이 한도를 넘으면 `resource-exhausted` + `details {reason:'saved_post_limit', plan, limit, count}`.
+수정 저장(기존 문서)은 개수가 늘지 않고, 요청에 없는 input·style 은 기존 값 유지. 사진 dataURL·HTML 태그는 서버가 제거. `deletePost {postId}` → `{deleted, savedPostCount}`.
+예전 로컬 글 이전: `{legacyId, legacySavedAt, ...}` → 문서 `legacy_{uid}_{id}` (중복 없음, 한도 적용).
+
+## authorizeExport ✅
+요청 `{ requestId: "exp_..." }` → `{ allowed, plan, exportCount, limit, remaining, duplicate }`. 같은 requestId 재전송은 `duplicate:true` 로 1회만 집계.
+FREE 누적 한도 초과 시 `resource-exhausted` + `reason:'export_limit'`. 파일 내용 검증은 브라우저가 승인 요청 **전에** 하므로 검증 실패는 횟수를 쓰지 않음.
+> JSON 파일은 브라우저에서 만들어지므로 DRM 이 아닙니다. 앱의 공식 내보내기 버튼 사용 횟수를 서버가 제한합니다.
+
+## saveStyle / deleteStyle ✅
+`saveStyle { styleId?, name, blogName, greeting, closing, tone, useEmoji, extra }` → `{ styleId, created, styleCount, limit, plan }` (한도 초과 `style_limit`). `deleteStyle {styleId}` → `{deleted}`. 텍스트만 저장, 길이 제한·HTML 제거.
+
+## adminSetPlan ✅ (관리자 · 테스트 전용)
+`{ uid, plan:'free'|'pro', reason }` → `{ uid, plan }`. 결제·크레딧과 무관하며 `planSource:'admin_test'` 로 기록. 실제 PRO 전환은 STEP 3 결제 확정 시 서버가 수행.
 
 ## adminAdjustCredits ✅
 요청 `{ uid, delta, reason, requestId, bucket? }` — `bucket`: `free`(적립 기본) / `paid`. 회수 시 미지정이면 무료→유료 순.
@@ -123,4 +151,4 @@ npx firebase functions:secrets:set NAVER_CLIENT_SECRET
 STEP 1 설계 유지: 서버가 `creditPackages` 금액으로 주문 생성 → 토스 승인 API(`TOSS_SECRET_KEY`, `Idempotency-Key: orderId`) → 트랜잭션으로 `paidCredits += credits`, `creditLedger/purchase_{orderId}` (bucket `paid`).
 
 ## 크레딧이 드는 작업
-새로운 AI 생성(`generatePost`)만 1크레딧입니다. 저장·저장 글 확인·생성 이력·JSON 내보내기/불러오기·사진 미리보기는 서버 호출이 없거나 무료입니다 ([PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md) 4절).
+새로운 AI 생성·재생성(`generatePost`)만 1크레딧입니다. 결과 확인·본문 수정·복사·저장·삭제·사진 업로드·미리보기·JSON 내보내기/불러오기·스타일 설정은 크레딧을 쓰지 않습니다 (저장 글·내보내기·스타일은 FREE 개수/횟수 제한만 있음) ([PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md) 4절).

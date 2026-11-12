@@ -2,13 +2,28 @@
 //
 // 포함: 입력 원문·장소 정보, 글 유형·분량, SEO 제목, 키워드, 본문, 해시태그, 릴스, 썸네일,
 //       사진 배치 정보([사진N] 위치·장수), 작성 스타일, 작성 일시
-// 제외: 사진·Base64 데이터, API 키, 인증 토큰, 크레딧 잔액, 관리자 권한, 결제 정보, 내부 ID(uid 포함 generationId 등)
+// 제외: 사진·Base64 데이터, API 키, 인증 토큰, 크레딧 잔액·원장, 회원 등급, 관리자 권한, 결제 정보, 내보내기 횟수,
+//       내부 ID(uid 포함 generationId, 스타일 문서 ID 등)
+// 버전: v3(작성 스타일 스냅샷 포함) — v2 백업과 예전 브라우저 저장 글도 불러올 수 있음
 
 export const BACKUP_FORMAT = 'jaeinit-blog-studio';
-export const BACKUP_VERSION = 2;
+export const BACKUP_VERSION = 3;
 export const MAX_IMPORT_BYTES = 1_000_000;
-// 현재 작성 스타일은 잰잇 고정 스타일 (설정 화면 없음) — 향후 스타일 선택 기능을 위해 기록만 함
-export const WRITING_STYLE = { preset: 'jaeinit_v3', label: '잰잇 여행블로그 기본 스타일' };
+// 작성 스타일 스냅샷 — 서버 functions/src/ai/styles.js 의 snapshotOf 와 같은 필드 (내부 ID 없음)
+const STYLE_LIMITS = { name: 30, blogName: 30, greeting: 100, closing: 200, extra: 500 };
+const TONES = ['friendly', 'informative', 'emotional'];
+export const DEFAULT_STYLE = { preset: 'basic', name: '기본 스타일' };
+export function cleanStyle(st) {
+  const x = st && typeof st === 'object' ? st : null;
+  if (!x) return null;
+  if (x.preset === 'jaeinit' || x.preset === 'jaeinit_v3') return { preset: 'jaeinit', name: '잰잇 스타일 (기존)' }; // v2 의 jaeinit_v3 포함
+  const out = { preset: x.preset === 'basic' ? 'basic' : 'custom' };
+  for (const [k, max] of Object.entries(STYLE_LIMITS)) out[k] = str(x[k], max);
+  if (!out.name) out.name = out.preset === 'basic' ? '기본 스타일' : '내 스타일';
+  out.tone = TONES.includes(x.tone) ? x.tone : 'friendly';
+  out.useEmoji = x.useEmoji !== false;
+  return out;
+}
 
 const TYPES = ['맛집', '카페', '여행', '숙소', '캠핑', '미용', '쇼핑', '투어', '전시'];
 const VOLUMES = ['short', 'normal', 'long'];
@@ -22,7 +37,11 @@ const LONG_BASE64_RE = /[A-Za-z0-9+/]{2000,}={0,2}/g;
 export function stripImageData(s) {
   return String(s == null ? '' : s).replace(IMAGE_DATA_RE, '').replace(LONG_BASE64_RE, '');
 }
-const str = (v, max) => stripImageData(typeof v === 'string' ? v : v == null ? '' : String(v)).slice(0, max || 20000);
+// HTML 태그 제거 (화면에는 textContent 로만 표시하지만, 파일 단계에서도 한 번 더 걸러냄)
+const HTML_TAG_RE = /<\/?[a-z!][^>]*>/gi;
+const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
+const str = (v, max) => stripImageData(typeof v === 'string' ? v : (v == null || typeof v === 'object') ? '' : String(v))
+  .replace(HTML_TAG_RE, '').replace(CONTROL_RE, '').slice(0, max || 20000);
 
 /** 본문 \\n 이스케이프를 실제 줄바꿈으로 본 뒤 [사진N] 위치 정보 */
 export function photoLayout(body) {
@@ -58,9 +77,9 @@ function cleanInput(i) {
 
 /**
  * 내보낼 JSON 객체.
- * @param {{input?:object, result:object, createdAt?:string|Date}} p
+ * @param {{input?:object, result:object, createdAt?:string|Date, style?:object}} p
  */
-export function buildExport({ input, result, createdAt }) {
+export function buildExport({ input, result, createdAt, style }) {
   if (!result) throw new Error('내보낼 생성 결과가 없어요.');
   const r = cleanResult(result);
   const i = cleanInput(input);
@@ -71,7 +90,7 @@ export function buildExport({ input, result, createdAt }) {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     createdAt: createdAt ? new Date(createdAt).toISOString() : null,
-    style: { ...WRITING_STYLE },
+    style: cleanStyle(style) || { ...DEFAULT_STYLE },
     input: i,
     result: r,
     photoLayout: { ...layout, note: '실제 사진은 포함되지 않습니다. 필요하면 다시 첨부해주세요.' },
@@ -87,8 +106,8 @@ export function exportFileName(exp) {
 }
 
 /**
- * 불러오기: 문자열 → { input, result, createdAt, imageCount, source, note }
- * 지원 형식: v2 백업 / 예전 브라우저 저장 글({id,title,type,date,data}) 단일 또는 배열 / 생성 결과 객체만
+ * 불러오기: 문자열 → { input, result, createdAt, imageCount, style, source, note }
+ * 지원 형식: v3·v2 백업 / 예전 브라우저 저장 글({id,title,type,date,data}) 단일 또는 배열 / 생성 결과 객체만
  * 알 수 없는 필드(크레딧·토큰·키·권한 등)는 모두 버린다.
  */
 export function parseImport(text) {
@@ -102,12 +121,14 @@ export function parseImport(text) {
     if (j.length > 1) note = `파일에 글이 ${j.length}개 있어 첫 번째 글을 불러왔어요.`;
     j = j[0];
   }
-  if (!j || typeof j !== 'object') throw new Error('불러올 수 없는 파일이에요.');
+  if (!j || typeof j !== 'object' || Array.isArray(j)) throw new Error('불러올 수 없는 파일이에요.');
 
-  let input; let result; let createdAt = null; let source;
+  let input; let result; let createdAt = null; let source; let style = null;
   if (j.format === BACKUP_FORMAT && j.result) {
+    if (Number(j.version) > BACKUP_VERSION) note = '더 새로운 버전에서 만든 파일이에요. 알 수 있는 항목만 불러왔어요.';
     source = 'backup';
-    input = j.input; result = j.result; createdAt = j.createdAt || null;
+    input = j.input; result = j.result; style = cleanStyle(j.style);
+    createdAt = typeof j.createdAt === 'string' && !Number.isNaN(Date.parse(j.createdAt)) ? new Date(j.createdAt).toISOString() : null;
   } else if (j.data && typeof j.data === 'object' && (j.data.body != null || j.data.title_1 != null)) {
     source = 'legacy_saved_post'; // 예전 v3 저장 글 형식
     input = { title: j.title || j.data.title_1 || '', type: j.type || '' };
@@ -120,8 +141,9 @@ export function parseImport(text) {
   }
   const r = cleanResult(result);
   if (!r.body && !r.title_1) throw new Error('불러올 본문이 없어요.');
+  if (result.hashtags != null && !Array.isArray(result.hashtags)) throw new Error('해시태그 형식이 올바르지 않아요.');
   const i = cleanInput(input);
   const layout = photoLayout(r.body);
   const imageCount = i.imageCount || layout.maxIndex || layout.count;
-  return { input: { ...i, imageCount }, result: r, createdAt, imageCount, source, note };
+  return { input: { ...i, imageCount }, result: r, createdAt, imageCount, style, source, note };
 }

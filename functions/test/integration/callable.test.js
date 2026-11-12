@@ -40,14 +40,14 @@ test.before(async () => {
 });
 
 test('비로그인: 모든 callable 이 unauthenticated', async () => {
-  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits', 'deleteAccount', 'adminCheckAiConfig']) {
+  for (const name of ['ensureUserProfile', 'generatePost', 'getGenerationStatus', 'createOrder', 'confirmPayment', 'adminAdjustCredits', 'deleteAccount', 'adminCheckAiConfig', 'savePost', 'deletePost', 'authorizeExport', 'saveStyle', 'deleteStyle', 'adminSetPlan']) {
     const r = await call(name, {});
     assert.equal(r.status, 401, name);
     assert.equal(r.body.error.status, 'UNAUTHENTICATED', name);
   }
 });
 
-test('이메일 가입 → 미인증 0크레딧 → 인증 후 2크레딧 (동시 호출 포함)', async () => {
+test('이메일 가입 → 미인증 0크레딧 → 인증 후 5크레딧 (동시 호출 포함)', async () => {
   const u = await signUp('flow@x.com');
   const r1 = await call('ensureUserProfile', {}, u.idToken);
   assert.equal(r1.status, 200);
@@ -61,7 +61,7 @@ test('이메일 가입 → 미인증 0크레딧 → 인증 후 2크레딧 (동�
   assert.ok(ok.length >= 1);
   assert.equal(ok.filter((r) => r.body.result.granted).length, 1);
   const again = await call('ensureUserProfile', {}, u.idToken);
-  assert.equal(again.body.result.credits, 2);
+  assert.equal(again.body.result.credits, 5);
 });
 
 const GOOD = (id) => ({ title: '세비야 맛집', type: '맛집', content: '살모레호 맛있음', volume: 'normal', images: ['data:image/jpeg;base64,/9j/AAAA', 'data:image/jpeg;base64,/9j/BBBB'], clientRequestId: id });
@@ -75,7 +75,7 @@ test('generatePost: 이메일 미인증 사용자는 생성 불가 (차감 없�
   assert.equal(r.body.error.details.reason, 'email_not_verified');
 });
 
-test('generatePost(에뮬레이터 mock AI): 2회 성공 → 3회째 차단, 상태 조회, 타인 조회 차단, 응답에 키 없음', async () => {
+test('generatePost(에뮬레이터 mock AI): 무료 5회 성공 → 6회째 차단, 상태 조회, 타인 조회 차단, 응답에 키 없음', async () => {
   const u = await signUp('gen@x.com');
   await verifyEmail(u.uid);
   await call('ensureUserProfile', {}, u.idToken);
@@ -86,7 +86,7 @@ test('generatePost(에뮬레이터 mock AI): 2회 성공 → 3회째 차단, 상
   const r1 = await call('generatePost', GOOD('req_gen_00001'), u.idToken);
   assert.equal(r1.status, 200, JSON.stringify(r1.body));
   const g1 = r1.body.result;
-  assert.deepEqual([g1.status, g1.mock, g1.creditsRemaining, g1.imageCount], ['succeeded', true, 1, 2]);
+  assert.deepEqual([g1.status, g1.mock, g1.creditsRemaining, g1.imageCount], ['succeeded', true, 4, 2]);
   assert.ok(!JSON.stringify(r1.body).includes('/9j/'), '응답에 사진 데이터 없음');
   assert.ok(g1.result.body.includes('[사진1]') && g1.result.body.includes('[사진2]'));
   assert.ok(!JSON.stringify(r1.body).match(/sk-ant|x-api-key|ANTHROPIC/i));
@@ -95,9 +95,10 @@ test('generatePost(에뮬레이터 mock AI): 2회 성공 → 3회째 차단, 상
   const dup = await call('generatePost', GOOD('req_gen_00001'), u.idToken);
   assert.deepEqual([dup.body.result.duplicate, dup.body.result.generationId], [true, g1.generationId]);
 
-  const r2 = await call('generatePost', GOOD('req_gen_00002'), u.idToken);
-  assert.equal(r2.body.result.creditsRemaining, 0);
-  const r3 = await call('generatePost', GOOD('req_gen_00003'), u.idToken);
+  let last;
+  for (const n of [2, 3, 4, 5]) last = await call('generatePost', GOOD(`req_gen_0000${n}`), u.idToken);
+  assert.equal(last.body.result.creditsRemaining, 0);
+  const r3 = await call('generatePost', GOOD('req_gen_00006'), u.idToken);
   assert.equal(r3.body.error.status, 'FAILED_PRECONDITION');
   assert.equal(r3.body.error.details.reason, 'insufficient_credits');
 
@@ -114,7 +115,7 @@ test('generatePost(mock AI 오류): 실패 응답에 크레딧 복구 안내 + �
   await call('ensureUserProfile', {}, u.idToken);
   const r = await call('generatePost', { ...GOOD('req_fail_0001'), memo: '[[mock:error]]' }, u.idToken);
   assert.equal(r.body.error.status, 'UNAVAILABLE');
-  assert.deepEqual([r.body.error.details.refunded, r.body.error.details.creditsRemaining], [true, 2]);
+  assert.deepEqual([r.body.error.details.refunded, r.body.error.details.creditsRemaining], [true, 5]);
   assert.match(r.body.error.message, /복구/);
 });
 
@@ -147,10 +148,10 @@ test('adminAdjustCredits: admin claim 사용자는 조정 가능 + 원장 기록
   const adminToken = (await r0.json()).idToken;
   const r = await call('adminAdjustCredits', { uid: target.uid, delta: 3, reason: 'CS 보상', requestId: 'req_cs000001' }, adminToken);
   assert.equal(r.status, 200);
-  assert.equal(r.body.result.balanceAfter, 5);
+  assert.equal(r.body.result.balanceAfter, 8);
   const again = await call('adminAdjustCredits', { uid: target.uid, delta: 3, reason: 'CS 보상', requestId: 'req_cs000001' }, adminToken);
   assert.equal(again.body.result.duplicate, true);
-  assert.equal(again.body.result.balanceAfter, 5);
+  assert.equal(again.body.result.balanceAfter, 8);
 });
 
 async function adminToken(email) {
@@ -190,4 +191,29 @@ test('deleteAccount: 확인 문구 필요 → 데이터·Auth 계정 삭제, 다
   });
   assert.equal(login.status, 400);
   assert.equal((await fetch(`${FS}/v1/projects/${PROJECT}/databases/(default)/documents/users/${u.uid}`, { headers: { Authorization: 'Bearer owner' } })).status, 404);
+});
+
+test('기능 한도 callable: 저장 글·내보내기·스타일 (FREE), adminSetPlan 은 관리자만, 응답에 내부 정보 없음', async () => {
+  const u = await signUp('feat@x.com');
+  await verifyEmail(u.uid);
+  await call('ensureUserProfile', {}, u.idToken);
+  const RES = { title_1: '제목', body: '본문 [사진1]', hashtags: ['#a'] };
+  for (let i = 0; i < 5; i++) {
+    const r = await call('savePost', { clientSaveId: `save_feat_${i}000`, data: RES, input: { title: 't', imageCount: 1 } }, u.idToken);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+  }
+  const over = await call('savePost', { clientSaveId: 'save_feat_over', data: RES }, u.idToken);
+  assert.deepEqual([over.body.error.status, over.body.error.details.reason, over.body.error.details.limit], ['RESOURCE_EXHAUSTED', 'saved_post_limit', 5]);
+  const ex = await call('authorizeExport', { requestId: 'exp_feat_0001' }, u.idToken);
+  assert.deepEqual([ex.body.result.allowed, ex.body.result.remaining], [true, 4]);
+  const st = await call('saveStyle', { name: '내 스타일', greeting: '안녕하세요' }, u.idToken);
+  assert.equal(st.status, 200);
+  assert.equal((await call('saveStyle', { name: '둘째' }, u.idToken)).body.error.details.reason, 'style_limit');
+  const deny = await call('adminSetPlan', { uid: u.uid, plan: 'pro', reason: 'self' }, u.idToken);
+  assert.equal(deny.body.error.status, 'PERMISSION_DENIED');
+  const t = await adminToken('boss3@x.com');
+  const ok = await call('adminSetPlan', { uid: u.uid, plan: 'pro', reason: '테스트 계정' }, t);
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const more = await call('savePost', { clientSaveId: 'save_feat_pro1', data: RES }, u.idToken);
+  assert.deepEqual([more.status, more.body.result.limit, more.body.result.plan], [200, null, 'pro']);
 });

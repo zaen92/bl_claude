@@ -1,14 +1,15 @@
-# ✍️ 잰잇 블로그 스튜디오 — SaaS (STEP 2.6)
+# ✍️ 잰잇 블로그 스튜디오 — SaaS (STEP 2 · FREE/PRO 정책)
 
 `jaeinit_blog_studio_v3.html`(단일 HTML, 브라우저에서 Claude/네이버 API 직접 호출)을
 Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
 
-- **STEP 1**: 모듈화 · Google/이메일 로그인 · 가입 무료 크레딧 2개(서버 원자 지급) · 스키마 · 보안 규칙
+- **STEP 1**: 모듈화 · Google/이메일 로그인 · 가입 무료 크레딧(서버 원자 지급) · 스키마 · 보안 규칙
 - **STEP 2**: Cloud Functions 에서 **실제 Claude 생성**(기존 프롬프트·웹 검색·사진 분석/배치·네이버 검색) · **1회 1크레딧 차감/실패 시 자동 복구** · 멱등 키·동시성·속도/일일 한도 · 생성 상태 복구 · 생성 이력 · App Check 준비 · 토큰/비용 기록
 - **STEP 2.5 (안정화)**: 실제 API 검증 도구(`test:live`, 관리자 AI 점검), 공식 단가 재확인, 실패 호출 비용·일일 비용 상한·긴급 중지, 이중 환급 방지 검증, 비용 벤치마크·손익 리포트, 보안 검토
 - **STEP 2.6 (스테이징 준비)**: 스테이징/운영 분리(`.env.staging`/`.env.prod`, 별칭), 스테이징 허용 목록 모드·STAGING 표시, 배포 사전 점검(`preflight`), 배포된 스테이징 종합 점검(`staging-check`, 실제 Claude·Firestore), 운영자용 키 등록 가이드 → **[docs/STAGING_SETUP.md](docs/STAGING_SETUP.md)**
 - **사진 미저장 전환**: 사진은 Claude 분석·생성 직후 미리보기에만 쓰고 서버(Storage·Firestore)에 저장하지 않음, Cloud Storage·사진 보관 정책·삭제 스케줄러 제거, JSON 내보내기·불러오기(사진·민감정보 제외) → [docs/PHOTOS_AND_BACKUP.md](docs/PHOTOS_AND_BACKUP.md)
-- STEP 3 (예정): 토스페이먼츠 일회성 결제
+- **FREE/PRO 정책**: 가입 FREE·이메일 인증 후 무료 크레딧 1회(운영 설정, 기본 5개), FREE 저장 글 5개·JSON 내보내기 누적 5회·작성 스타일 1개(모두 서버 트랜잭션으로 제한, 운영 설정으로 변경 가능), PRO 무제한(전환은 STEP 3 결제), 개인화 작성 스타일(잰잇 프리셋 유지), 본문 수정·사진 순서 변경, JSON v3 → **[docs/PLANS_AND_LIMITS.md](docs/PLANS_AND_LIMITS.md)**
+- STEP 3 (예정): 토스페이먼츠 일회성 결제 + 첫 결제 시 PRO 전환
 
 > 일반 사용자는 API 키를 입력하지 않습니다. 운영자가 발급한 Anthropic 키는 Firebase Secret Manager 에만 보관되고 서버(Cloud Functions)에서만 사용됩니다.
 
@@ -22,24 +23,26 @@ Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
 │   ├── .env.example                      # Firebase 웹 설정 (공개 식별자만)
 │   └── src/
 │       ├── style.css                     # 기존 스타일 그대로 + 모달 추가 스타일
-│       ├── main.js                       # 화면 흐름 (gen, savePost, 저장 목록, 로그인 UI)
+│       ├── main.js                       # 화면 흐름 (gen, savePost, 저장 목록, 로그인 UI, 사용량·PRO 안내·스타일 관리·본문 수정)
 │       ├── render.js                     # show / renderPreview / 복사
-│       ├── images.js                     # 사진 압축 업로드
+│       ├── images.js                     # 사진 압축 업로드·삭제·순서 변경 (메모리에만)
+│       ├── features.js                   # 운영 설정 읽기, 저장·내보내기·스타일 callable
 │       ├── firebase.js                   # 초기화 + 에뮬레이터 연결
 │       ├── auth.js  api.js  account.js  posts.js  state.js
 │       ├── generations.js                # 생성 이력, 진행 중 생성 추적(새로고침 복구)
 │       └── backup.js                     # JSON 내보내기·불러오기 (사진·민감정보 제외)
 ├── functions/                            # Cloud Functions (Node 22, 2nd gen, asia-northeast3)
-│   ├── index.js                          # callable: ensureUserProfile, adminAdjustCredits, generatePost, getGenerationStatus + 스케줄러
+│   ├── index.js                          # callable: ensureUserProfile, generatePost, savePost, authorizeExport, saveStyle, admin* … + 스케줄러
 │   ├── .env / .env.demo-jaeinit          # 모델·한도 설정 / 에뮬레이터 전용(AI_MOCK)
 │   ├── .secret.local.example             # 로컬 비밀값 예시 (복사해서 .secret.local)
 │   ├── src/generation/service.js         # 예약 → Claude → 확정 / 실패 복구 / 스테일 복구
-│   ├── src/ai/    prompt.js parse.js claude.js mockClient.js mock.js
+│   ├── src/ai/    prompt.js styles.js parse.js claude.js mockClient.js mock.js
 │   ├── src/lib/   credits.js(무료 우선 버킷) email.js schema.js
 │   ├── src/account/deleteAccount.js      # 회원 탈퇴 데이터 정리
+│   ├── src/account/features.js           # 저장 글·내보내기·스타일 한도, 테스트용 등급 변경
 │   ├── src/ops/costAnalysis.js           # 비용 요약·손익 계산
 │   ├── src/naver.js
-│   ├── src/config/ params.js pricing.js secrets.js
+│   ├── src/config/ params.js pricing.js secrets.js policy.js(FREE/PRO 기본값·config/policy)
 │   └── test/unit, test/integration, test/live(실제 API), test/fixtures
 ├── tests/rules/                          # Firestore 보안 규칙 테스트
 ├── tests/web/backup.test.mjs             # JSON 내보내기·불러오기 테스트
@@ -51,8 +54,10 @@ Firebase 기반 유료 SaaS 로 전환하는 코드입니다.
 ├── scripts/preflight.mjs                 # 배포 전 사전 점검 (미준비 시 배포 차단)
 ├── scripts/staging-check.mjs             # 배포된 스테이징 종합 점검 (실제 Claude·Firestore, --emulator 지원)
 ├── scripts/migrate-remove-photos.mjs     # (필요 시) 예전 사진 데이터 조회·정리 — 기본은 조회만
+├── scripts/policy.mjs                    # 운영 설정(config/policy) 조회·변경 (--apply 시에만 변경)
+├── scripts/test-member.mjs               # 테스트 회원 크레딧·등급 조정 (원장 기록, --apply 시에만)
 ├── firestore.rules  firestore.indexes.json  firebase.json  .firebaserc
-└── docs/  ARCHITECTURE SCHEMA API TESTING NEXT_STEPS APP_CHECK PHOTOS_AND_BACKUP AI_COST LIVE_VERIFICATION SECURITY_REVIEW
+└── docs/  ARCHITECTURE SCHEMA API TESTING NEXT_STEPS APP_CHECK PHOTOS_AND_BACKUP PLANS_AND_LIMITS PRIVACY_NOTES AI_COST LIVE_VERIFICATION SECURITY_REVIEW STAGING_SETUP
 ```
 
 ## 로컬 실행 (실제 Firebase 프로젝트 없이)
@@ -120,18 +125,20 @@ npm test
    npm run build && npx firebase deploy --only firestore,functions,hosting
    ```
 10. App Check: [docs/APP_CHECK.md](docs/APP_CHECK.md) 순서대로 (모니터링 → `ENFORCE_APP_CHECK=true`)
+11. 운영 설정 확인: `node scripts/policy.mjs --project <프로젝트ID>` (가입 크레딧·FREE 한도, 기본값이면 문서 없어도 됨)
 12. 상품 시드 (**가격 확정 후에만**, STEP 3): `GOOGLE_APPLICATION_CREDENTIALS=서비스계정.json npm run seed -- --project <프로젝트ID> --prices 10:<원>,30:<원>,70:<원>`
 13. 관리자 지정: `GOOGLE_APPLICATION_CREDENTIALS=서비스계정.json npm run set-admin -- --project <프로젝트ID> <이메일>`
 
 ## 서비스 정책 반영
 | 정책 | 구현 |
 |---|---|
-| 가입 시 무료 2크레딧 | `ensureUserProfile` 트랜잭션, 이메일 인증 후 1회, 이메일 해시로 재가입 차단 |
+| 가입 FREE + 무료 크레딧(기본 5) | `ensureUserProfile` 트랜잭션, 이메일 인증 후 1회, 지급량은 `config/policy` (이후 신규 가입자만), 이메일 해시로 재가입 차단 |
+| FREE 한도 (저장 5·내보내기 누적 5·스타일 1), PRO 무제한 | `savePost`/`authorizeExport`/`saveStyle` 서버 트랜잭션, 클라이언트 직접 쓰기 규칙 차단 ([PLANS_AND_LIMITS](docs/PLANS_AND_LIMITS.md)) |
 | 생성 1회 = 1크레딧, 무료 우선 | 예약 트랜잭션에서 무료→유료 순 차감, 성공 시 확정, 실패·중단 시 같은 버킷으로 자동 복구 |
 | 0크레딧 생성 불가 | 클라이언트 안내 + 서버 트랜잭션에서 거부 (AI 미호출) |
 | 중복·동시 요청 | 멱등 키 `generations/{uid}_{clientRequestId}`, 트랜잭션 잔액 검사, 동시 실행 상한 |
 | 10/30/70회 일회성 구매, 토스페이먼츠 | `creditPackages`/`orders` 스키마 + `createOrder`/`confirmPayment` 인터페이스, 구현은 STEP 3 |
-| 크레딧은 서버만 변경 | 보안 규칙에서 users.credits / creditLedger / orders / generations 클라이언트 쓰기 전면 차단 |
+| 크레딧·등급·사용량은 서버만 변경 | 보안 규칙에서 users.credits·plan·카운터 / creditLedger / orders / generations / posts / styles 클라이언트 쓰기 차단 |
 | 비밀키 서버 보관 | 브라우저 키 저장 코드 삭제 + 기존 키 localStorage 에서 제거, Secret Manager 정의 |
 
-문서: **[스테이징·키 등록](docs/STAGING_SETUP.md)** · [실제 API 검증](docs/LIVE_VERIFICATION.md) · [보안 검토](docs/SECURITY_REVIEW.md) · [기존 코드 분석](docs/ARCHITECTURE.md) · [스키마](docs/SCHEMA.md) · [API](docs/API.md) · [테스트](docs/TESTING.md) · [App Check](docs/APP_CHECK.md) · [사진·JSON](docs/PHOTOS_AND_BACKUP.md) · [AI 비용](docs/AI_COST.md) · [다음 단계](docs/NEXT_STEPS.md)
+문서: **[스테이징·키 등록](docs/STAGING_SETUP.md)** · [실제 API 검증](docs/LIVE_VERIFICATION.md) · [보안 검토](docs/SECURITY_REVIEW.md) · [기존 코드 분석](docs/ARCHITECTURE.md) · [스키마](docs/SCHEMA.md) · [API](docs/API.md) · [테스트](docs/TESTING.md) · [App Check](docs/APP_CHECK.md) · [사진·JSON](docs/PHOTOS_AND_BACKUP.md) · [FREE/PRO 정책](docs/PLANS_AND_LIMITS.md) · [개인정보 메모](docs/PRIVACY_NOTES.md) · [AI 비용](docs/AI_COST.md) · [다음 단계](docs/NEXT_STEPS.md)

@@ -13,11 +13,11 @@ const { FieldValue } = require('firebase-admin/firestore');
 const {
   COL,
   BUCKET,
-  SIGNUP_BONUS_CREDITS,
   LEDGER_TYPE,
   SIGNUP_BONUS_STATUS,
 } = require('./schema');
 const { emailKey } = require('./email');
+const { getPolicy, PLAN } = require('../config/policy');
 
 class CreditError extends Error {
   constructor(code, message, details) {
@@ -128,6 +128,9 @@ async function ensureUserProfile(db, authUser) {
   return db.runTransaction(async (tx) => {
     const userSnap = await tx.get(userRef);
     const grantSnap = grantRef ? await tx.get(grantRef) : null;
+    // 가입 무료 크레딧은 운영 설정(config/policy.signupBonusCredits)에서 지급 시점의 값을 읽는다 — 기본 5
+    const policy = await getPolicy(db, tx);
+    const bonusAmount = policy.signupBonusCredits;
     const now = FieldValue.serverTimestamp();
     const existing = userSnap.exists ? userSnap.data() : null;
 
@@ -153,26 +156,30 @@ async function ensureUserProfile(db, authUser) {
       } else if (grantSnap && grantSnap.exists && grantSnap.data().uid !== uid) {
         bonus = { status: SIGNUP_BONUS_STATUS.INELIGIBLE, amount: 0, reason: 'email_already_used' };
       } else if (grantSnap && grantSnap.exists) {
-        bonus = { status: SIGNUP_BONUS_STATUS.GRANTED, amount: SIGNUP_BONUS_CREDITS, reason: 'reconciled' };
+        bonus = { status: SIGNUP_BONUS_STATUS.GRANTED, amount: grantSnap.data().amount || 0, reason: 'reconciled' };
       } else if (!emailVerified) {
         bonus = { status: SIGNUP_BONUS_STATUS.PENDING_VERIFICATION, amount: 0 };
+      } else if (bonusAmount <= 0) {
+        // 운영 설정으로 가입 보너스를 0 으로 둔 경우: 지급 없이 확정 (이메일 이력은 남겨 이후 재가입 판단에 사용)
+        tx.create(grantRef, { uid, grantedAt: now, amount: 0 });
+        bonus = { status: SIGNUP_BONUS_STATUS.GRANTED, amount: 0, grantedAt: now, reason: 'policy_zero' };
       } else {
         const r = writeLedgerInTx(tx, db, {
           uid,
           buckets,
-          delta: SIGNUP_BONUS_CREDITS,
+          delta: bonusAmount,
           bucket: BUCKET.FREE,
           type: LEDGER_TYPE.SIGNUP_BONUS,
           ledgerId: `signup_bonus_${uid}`,
           refType: 'signup',
           refId: uid,
-          reason: '회원가입 무료 크레딧',
+          reason: `회원가입 무료 크레딧 ${bonusAmount}개`,
           actor: { type: 'system', uid: null },
         });
         balanceFields = r.userFields;
         buckets = { free: r.userFields.freeCredits, paid: r.userFields.paidCredits, credits: r.balanceAfter };
-        tx.create(grantRef, { uid, grantedAt: now, amount: SIGNUP_BONUS_CREDITS });
-        bonus = { status: SIGNUP_BONUS_STATUS.GRANTED, amount: SIGNUP_BONUS_CREDITS, grantedAt: now };
+        tx.create(grantRef, { uid, grantedAt: now, amount: bonusAmount });
+        bonus = { status: SIGNUP_BONUS_STATUS.GRANTED, amount: bonusAmount, grantedAt: now };
         granted = true;
       }
     }
@@ -185,6 +192,9 @@ async function ensureUserProfile(db, authUser) {
         upd.paidCredits = buckets.paid;
       }
       if (!existing.displayName && authUser.displayName) upd.displayName = authUser.displayName;
+      // 등급 필드가 없는 기존 회원은 FREE 로 보정 (사용량 카운터는 실제 데이터로 저장 시점에 계산)
+      if (!existing.plan) upd.plan = PLAN.FREE;
+      if (!Number.isInteger(existing.exportCount)) upd.exportCount = 0;
       tx.update(userRef, upd);
     } else {
       tx.create(userRef, {
@@ -197,11 +207,18 @@ async function ensureUserProfile(db, authUser) {
         signupBonus: bonus,
         role: 'user', // 표시용. 실제 권한은 custom claim(admin)으로만 판단
         activeGenerations: 0,
+        // 회원 등급·사용량 (서버만 변경 — 보안 규칙상 클라이언트 수정 불가)
+        plan: PLAN.FREE,
+        planSource: 'signup',
+        upgradedAt: null,
+        exportCount: 0,
+        savedPostCount: 0,
+        styleCount: 0,
         createdAt: now,
       });
     }
 
-    return { created: !existing, granted, credits: buckets.credits, signupBonusStatus: bonus.status, signupBonusReason: bonus.reason || null };
+    return { created: !existing, granted, credits: buckets.credits, signupBonusStatus: bonus.status, signupBonusReason: bonus.reason || null, signupBonusAmount: bonus.amount || 0 };
   });
 }
 

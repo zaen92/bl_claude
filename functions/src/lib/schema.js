@@ -17,7 +17,9 @@ const COL = Object.freeze({
   GENERATION_METRICS: 'generationMetrics', // 생성별 토큰·비용·품질 (개인 입력 내용 없음)
   OPS_DAILY: 'opsDaily',                   // 일별 합계 (비용 상한 판단)
   ACCOUNT_DELETIONS: 'accountDeletions',   // 회원 탈퇴 처리 기록
-  CONFIG: 'config',                        // config/service: 생성 일시중지·일일 비용 상한 (관리자 수정)
+  CONFIG: 'config',                        // config/service: 생성 중지·비용 상한 / config/policy: FREE·PRO 한도, 가입 무료 크레딧
+  STYLES: 'styles',                        // 사용자 개인화 작성 스타일 (서버만 쓰기, 본인 읽기)
+  EXPORT_GRANTS: 'exportGrants',           // JSON 내보내기 승인 기록 (서버 전용, 재전송 중복 집계 방지)
 });
 
 
@@ -30,8 +32,6 @@ const GENERATION_STATUS = Object.freeze({
   FAILED: 'failed',         // 실패 → 크레딧 복구됨
 });
 
-/** 회원가입 무료 크레딧 */
-const SIGNUP_BONUS_CREDITS = 2;
 /** AI 생성 1회당 차감 크레딧 (STEP 2에서 사용) */
 const GENERATION_COST = 1;
 
@@ -58,7 +58,6 @@ module.exports = {
   COL,
   BUCKET,
   GENERATION_STATUS,
-  SIGNUP_BONUS_CREDITS,
   GENERATION_COST,
   LEDGER_TYPE,
   SIGNUP_BONUS_STATUS,

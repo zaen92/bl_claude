@@ -26,7 +26,9 @@
     "staging-check": "node scripts/staging-check.mjs",
     "staging-check:emu": "firebase emulators:exec --project demo-jaeinit --only auth,firestore,functions \"node scripts/staging-check.mjs --emulator\"",
     "migrate:photos": "node scripts/migrate-remove-photos.mjs",
-    "test:web": "node --test tests/web/*.test.mjs"
+    "test:web": "node --test tests/web/*.test.mjs",
+    "policy": "node scripts/policy.mjs",
+    "test-member": "node scripts/test-member.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^6.0.0",

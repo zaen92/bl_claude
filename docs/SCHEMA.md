@@ -4,7 +4,8 @@
 모든 시각 필드는 Firestore `Timestamp` (서버 시간).
 
 ## users/{uid}
-읽기: 본인, 관리자 · 쓰기: 🖥️ (본인은 `displayName`, `updatedAt` 만 수정 가능)
+읽기: 본인, 관리자 · 쓰기: 🖥️ (본인은 `displayName`, `updatedAt` 만 수정 가능 — **plan·크레딧·사용량 카운터는 클라이언트가 바꿀 수 없음**)
+> `plan`/카운터가 없는 예전 문서는 로그인 시 `plan:'free'` 로 채우고, 카운터는 첫 사용 때 실제 문서 수로 계산합니다 (일괄 마이그레이션 불필요).
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
@@ -21,7 +22,13 @@
 | activeGenerations | int | 처리 중인 생성 수 (동시 실행 상한 판단) |
 | usage | map | `{minuteStart(ms), minuteCount, day('YYYY-MM-DD' KST), dayCount}` — 분당/일일 한도 |
 | lastGenerationAt | Timestamp | |
-| signupBonus | map | `{status: 'granted'\|'pending_verification'\|'ineligible', amount, reason?, grantedAt?}` |
+| signupBonus | map | `{status: 'granted'\|'pending_verification'\|'ineligible', amount, reason?, grantedAt?}` — amount 는 **가입 시점의 운영 설정값**(`config/policy.signupBonusCredits`) |
+| **plan** | `'free'`\|`'pro'` | 회원 등급. 신규 가입 = `free`. STEP 3 첫 유료 결제 시 `pro` (크레딧 0 이어도 유지, 구독 아님) |
+| planSource | string | `signup` / `purchase`(STEP 3) / `admin_test`(관리자 테스트 설정) |
+| upgradedAt | Timestamp\|null | PRO 전환 시각 |
+| exportCount | int | 앱 내 JSON 내보내기 **누적** 승인 횟수 (월 초기화 없음) |
+| savedPostCount | int | 계정 저장 글 수 (서버가 저장·삭제 트랜잭션에서 증감) |
+| styleCount | int | 저장한 작성 스타일 수 |
 | role | string | 표시용 `'user'`. **권한 판단은 custom claim `admin` 만 사용** |
 | createdAt / updatedAt / lastLoginAt | Timestamp | |
 
@@ -88,6 +95,7 @@
 | uid / clientRequestId | string | |
 | status | string | `processing`(1크레딧 예약됨) → `succeeded`(차감 확정) / `failed`(크레딧 복구됨) |
 | input | map | `{title, type, content, memo, info, volume, imageCount}` — **텍스트만, 사진은 저장하지 않음** |
+| style | map | 생성에 쓴 작성 스타일 스냅샷 `{preset:'jaeinit'\|'basic'\|'custom', name, blogName, greeting, closing, tone, useEmoji, extra}` (스타일 문서 ID·uid 없음) |
 | result | map\|null | GenerationResult |
 | naver | map\|null | `{name, address, tel, category, link}` |
 | provider | string | `anthropic` / `mock`(에뮬레이터) |
@@ -100,18 +108,29 @@
 | createdAt / updatedAt / completedAt | Timestamp | |
 
 ## posts/{postId}  (사용자가 저장한 글)
-읽기/삭제: 본인 (관리자 읽기) · 생성/수정: 👤 (규칙에서 스키마 검증)
+읽기: 본인 (관리자 읽기) · 쓰기: 🖥️ **서버 callable `savePost`/`deletePost` 전용** — FREE 저장 개수 제한을 서버 트랜잭션으로 적용하기 위해 클라이언트 직접 쓰기는 규칙이 모두 거부
+
+문서 ID: 생성 결과 저장 = `generationId`(같은 결과를 다시 저장하면 수정) · 예전 로컬 글 = `legacy_{uid}_{id}` · 그 밖(JSON 불러오기 등) = `{uid}_save_{clientSaveId}` (재전송해도 1개)
 
 | 필드 | 타입 | 설명 |
 |---|---|---|
-| uid | string | 작성자 = `request.auth.uid` 강제 |
+| uid | string | 작성자 (서버가 로그인 uid 로 기록) |
 | title | string ≤ 300 | |
-| type | string ≤ 20 | 글 유형 |
-| data | map | **GenerationResult — 기존 localStorage `data` 와 동일 구조** |
-| input | map | `{title, memo, content, info, type, volume, imageCount}` 입력값 (텍스트만). 사진·Base64 불가 — 본문에 `data:image` 가 섞이면 규칙이 거부 |
+| type | string | 글 유형 (9종 중 하나 또는 빈 값) |
+| data | map | **GenerationResult — 기존 localStorage `data` 와 동일 구조** (서버가 사진 데이터·HTML 태그 제거) |
+| input | map | `{title, memo, content, info, type, volume, imageCount}` 입력값 (텍스트만) |
+| style | map\|null | 작성 스타일 스냅샷 (generations.style 과 같은 형식) |
 | generationId | string\|null | 원본 생성 기록 |
-| legacyId / legacySavedAt | int\|string / string | localStorage 에서 가져온 글만 |
-| createdAt / updatedAt | Timestamp | `request.time` 강제 |
+| legacyId / legacySavedAt | string / string | localStorage 에서 가져온 글만 |
+| createdAt / updatedAt | Timestamp | 서버 시간 |
+
+## styles/{styleId}  (개인화 작성 스타일)
+읽기: 본인, 관리자 · 쓰기: 🖥️ `saveStyle`/`deleteStyle` 전용 (FREE 1개, PRO 여러 개)
+`uid, name(≤30), blogName(≤30), greeting(≤100), closing(≤200), tone('friendly'|'informative'|'emotional'), useEmoji(bool), extra(≤500, 추가 작성 지침), createdAt, updatedAt`
+— 프리셋 `jaeinit`(기존 v3 프롬프트 그대로)·`basic`(블로그 이름·인사말 없음, 기본값)은 문서가 아니라 코드(`functions/src/ai/styles.js`)에 있습니다.
+
+## exportGrants/{uid}_{requestId}  (JSON 내보내기 승인 기록)
+읽기·쓰기: 🖥️ 전용. `uid, plan, createdAt` — 같은 requestId 재전송은 이 문서로 판별해 1회만 집계
 
 ### GenerationResult (기존 resultData 와 동일)
 `title_1, title_2, title_3, keyword_main, keyword_sub, keyword_location, keyword_intent, place_name, place_address, place_hours, place_price, body, hashtags[], reel, thumbnail`
@@ -125,7 +144,11 @@
 `succeeded, failed, aiCostUsd, aiCostUsdFailed, inputTokens, outputTokens, webSearchRequests, computeUsdEst, imageBytesSentAdded, byModel{<model>:{count,costUsd}}` — 일일 비용 상한 판단
 
 ### accountDeletions/{uid}
-`source('user_request'|'auth_trigger'), status('running'|'done'), posts, generations, startedAt, completedAt`
+`source('user_request'|'auth_trigger'), status('running'|'done'), posts, generations, styles, startedAt, completedAt` (탈퇴 시 posts·generations·styles·exportGrants·users 삭제)
+
+### config/policy  (누구나 읽기 · 관리자만 쓰기 — FREE/PRO 운영 설정)
+`signupBonusCredits(0~100, 기본 5), freeExportLimit(기본 5), freeSavedPostLimit(기본 5), freeStyleLimit(기본 1), proSavedPostLimit(기본 5000, 기술적 상한), proStyleLimit(기본 20), updatedAt, updatedBy`
+— 문서가 없거나 값이 잘못되면 코드 기본값(`functions/src/config/policy.js`). **가입 크레딧 변경은 이후 신규 가입자에게만 적용**되고 기존 잔액·원장은 바뀌지 않습니다. 운영 방법: [PLANS_AND_LIMITS.md](PLANS_AND_LIMITS.md)
 
 ### config/service  (관리자 읽기·쓰기)
 `generationEnabled(bool), pauseMessage(string ≤200), dailyCostLimitUsd(number), accessMode('open'|'allowlist'), allowedEmails(string[] ≤200)` — 재배포 없이 생성 일시중지·비용 상한·스테이징 테스터 관리
@@ -138,4 +161,4 @@
 사진은 **어디에도 저장하지 않습니다** (Cloud Storage 미사용, Firestore 에는 `imageCount` 와 본문 `[사진N]` 배치만). 자세한 내용: [PHOTOS_AND_BACKUP.md](PHOTOS_AND_BACKUP.md)
 
 ## 인덱스
-`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, generations `status + leaseExpiresAt`(스테일 복구).
+`firestore.indexes.json`: posts / creditLedger / orders / generations 의 `uid ASC + createdAt DESC`, styles `uid ASC + createdAt ASC`, generations `status + leaseExpiresAt`(스테일 복구).

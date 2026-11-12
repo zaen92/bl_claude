@@ -48,10 +48,12 @@ const FN_ERR = {
   'functions/permission-denied': '권한이 없어요.',
   'functions/deadline-exceeded': '응답이 지연되고 있어요.',
 };
+/** Firebase SDK 가 서버 메시지 끝에 붙이는 HTTP 상태 "[429]" 제거 */
+export const serverMessage = (e) => String((e && e.message) || '').replace(/\s*\[\d{3}\]$/, '');
 export function apiErrorMessage(e) {
   if (!e) return '오류가 발생했어요.';
-  if (e.details && e.details.reason) return e.message; // 서버가 만든 사용자용 메시지
-  if (['functions/invalid-argument', 'functions/unimplemented', 'functions/failed-precondition', 'functions/resource-exhausted'].includes(e.code)) return e.message;
+  if (e.details && e.details.reason) return serverMessage(e); // 서버가 만든 사용자용 메시지
+  if (['functions/invalid-argument', 'functions/unimplemented', 'functions/failed-precondition', 'functions/resource-exhausted'].includes(e.code)) return serverMessage(e);
   return FN_ERR[e.code] || '서버와 연결이 원활하지 않아요.';
 }
 /** 서버가 결과를 확정해 돌려준 오류인지 (아니면 네트워크 문제로 결과를 모르는 상태) */

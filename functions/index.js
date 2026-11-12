@@ -9,6 +9,8 @@
  *   sweepStaleGenerations 5분마다 멈춘 생성 건 크레딧 복구                             (STEP 2)
  *   deleteAccount / onAuthUserDeleted  회원 탈퇴 시 글·생성 기록 삭제                  (STEP 2.5)
  *   adminCheckAiConfig    관리자 AI 설정 점검                                         (STEP 2.5)
+ *   savePost / deletePost / authorizeExport / saveStyle / deleteStyle  FREE·PRO 한도 (서버 집계)
+ *   adminSetPlan          관리자 테스트용 등급 변경 (결제 아님)
  *   ※ 사진은 Claude 분석용으로 요청에서만 사용하고 서버에 저장하지 않는다 (Cloud Storage 미사용)
  *   createOrder / confirmPayment  인터페이스만 (STEP 3, 토스페이먼츠)
  */
@@ -28,6 +30,7 @@ const { ANTHROPIC_API_KEY, NAVER_CLIENT_ID, NAVER_CLIENT_SECRET, secretValue } =
 const service = require('./src/generation/service');
 const { findPlace } = require('./src/naver');
 const { deleteAccountData } = require('./src/account/deleteAccount');
+const features = require('./src/account/features');
 const { webSearchToolType } = require('./src/ai/claude');
 const functionsV1 = require('firebase-functions/v1');
 
@@ -230,6 +233,34 @@ exports.adminCheckAiConfig = onCall({ enforceAppCheck: ENFORCE_APP_CHECK, secret
     }
   }
   return out;
+});
+
+// ── FREE / PRO 기능 사용량 (서버가 집계, 클라이언트는 직접 쓸 수 없음) ──
+const withFeature = (fn) => onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, async (request) => {
+  const { uid } = requireAuth(request);
+  try {
+    return await fn(getFirestore(), uid, request.data || {});
+  } catch (err) {
+    throw toHttpsError(err);
+  }
+});
+/** 계정에 글 저장 (FREE 최대 N개, 같은 글 수정은 개수 증가 없음) — 크레딧 차감 없음 */
+exports.savePost = withFeature((db, uid, d) => features.savePost(db, uid, d));
+exports.deletePost = withFeature((db, uid, d) => features.deletePost(db, uid, d.postId));
+/** 앱 내 JSON 내보내기 승인 (FREE 누적 N회, 같은 requestId 재전송은 1회) — 크레딧 차감 없음 */
+exports.authorizeExport = withFeature((db, uid, d) => features.authorizeExport(db, uid, d));
+exports.saveStyle = withFeature((db, uid, d) => features.saveStyle(db, uid, d));
+exports.deleteStyle = withFeature((db, uid, d) => features.deleteStyle(db, uid, d.styleId));
+
+/** 관리자: 테스트용 등급 변경 — 실제 결제와 무관 (planSource='admin_test') */
+exports.adminSetPlan = onCall({ enforceAppCheck: ENFORCE_APP_CHECK }, async (request) => {
+  const admin = requireAdmin(request);
+  const d = request.data || {};
+  try {
+    return await features.adminSetPlan(getFirestore(), { uid: d.uid, plan: d.plan, reason: d.reason, actorUid: admin.uid });
+  } catch (err) {
+    throw toHttpsError(err);
+  }
 });
 
 /** @returns {Promise<import('./src/api/contracts').CreateOrderResponse>} STEP 3 */

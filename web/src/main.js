@@ -7,6 +7,7 @@ import * as acct from './account.js';
 import * as P from './posts.js';
 import * as G from './generations.js';
 import * as B from './backup.js';
+import * as F from './features.js';
 import { addImg } from './images.js';
 import { show, switchTab as baseSwitchTab, anim, cpId, cpTags, cpAll, cpTxt } from './render.js';
 
@@ -21,10 +22,25 @@ if (import.meta.env.VITE_ENV_LABEL) { g('envBadge').textContent = import.meta.en
 let unsubs = [];
 let ledger = [];
 let packagesLoaded = false;
+let policy = { ...F.DEFAULT_POLICY };   // 운영 설정 (config/policy) — 화면 안내용, 실제 한도는 서버가 판단
+let styles = [];                        // 내 작성 스타일
+let styleChoice = F.loadStyleChoice();  // 'preset:basic' | 'preset:jaeinit' | 'style:{id}'
+let postsUnsub = null;
+let postsLimit = P.PAGE_SIZE;
+let postsHasMore = false;
+let pendingExport = null;               // { key, requestId } — 승인 요청 재전송 시 같은 requestId (중복 차감 없음)
+let editingStyleId = null;
+
+F.loadPolicy().then((p) => { policy = p; applyPolicyText(); updateStatus(); renderAccount(); updateUsage(); });
+function applyPolicyText() { document.querySelectorAll('.bonusN').forEach((el) => { el.textContent = policy.signupBonusCredits; }); }
+const isPro = () => F.planOf(state.profile) === 'pro';
+const savedCountOf = () => (state.profile && Number.isInteger(state.profile.savedPostCount) ? state.profile.savedPostCount : state.posts.length);
+const exportCountOf = () => (state.profile && Number.isInteger(state.profile.exportCount) ? state.profile.exportCount : 0);
+const styleCountOf = () => styles.length;
 
 /* ── 모달 ── */
 function showView(v) {
-  ['viewLogin', 'viewVerify', 'viewAccount'].forEach((id) => g(id).classList.toggle('on', id === v));
+  ['viewLogin', 'viewVerify', 'viewAccount', 'viewStyle', 'viewPro'].forEach((id) => g(id).classList.toggle('on', id === v));
   g('modal').className = 'modal';
 }
 function closeModal() { g('modal').className = 'modal hide'; }
@@ -109,7 +125,7 @@ async function adminCheck() {
 
 /* ── 회원 탈퇴 ── */
 async function withdraw() {
-  const typed = prompt('탈퇴하면 저장된 글, 생성 이력, 사진이 모두 삭제되고 남은 크레딧도 사라져요.\n계속하려면 "탈퇴" 라고 입력해주세요.');
+  const typed = prompt('탈퇴하면 저장된 글, 생성 이력, 작성 스타일이 모두 삭제되고 남은 크레딧도 사라져요.\n계속하려면 "탈퇴" 라고 입력해주세요.');
   if (typed === null) return;
   if (typed.trim() !== '탈퇴') { msg('acctOk', '⚠️ 확인 문구가 일치하지 않아 취소했어요.', true); return; }
   try {
@@ -138,8 +154,16 @@ function renderAccount() {
   g('acctCredits').textContent = p ? (p.credits || 0) + '개' : '…';
   const bs = p && p.signupBonus ? p.signupBonus.status : '';
   g('acctBonus').textContent = bs === 'granted' ? '🎁 가입 무료 크레딧 지급 완료'
-    : bs === 'pending_verification' ? '📧 이메일 인증 후 무료 크레딧 2개가 지급돼요'
+    : bs === 'pending_verification' ? '📧 이메일 인증 후 무료 크레딧 ' + policy.signupBonusCredits + '개가 지급돼요'
       : bs === 'ineligible' ? '이 이메일은 이미 가입 혜택을 받았어요' : '';
+  const pro = isPro();
+  g('acctPlan').textContent = pro ? 'PRO' : 'FREE';
+  g('acctPlan').className = 'plan-badge' + (pro ? ' pro' : '');
+  g('acctPlanD').textContent = pro ? 'PRO 회원 · 크레딧을 다 써도 PRO 는 유지돼요' : '무료 회원 · 첫 크레딧 구매 시 PRO 로 전환돼요';
+  g('acctSaved').textContent = pro ? savedCountOf() + '개' : savedCountOf() + ' / ' + policy.freeSavedPostLimit;
+  g('acctExport').textContent = pro ? '무제한' : exportCountOf() + ' / ' + policy.freeExportLimit;
+  g('acctStyles').textContent = pro ? styleCountOf() + '개' : styleCountOf() + ' / ' + policy.freeStyleLimit;
+  g('acctProBtn').textContent = pro ? '⭐ PRO 혜택 보기' : '⭐ PRO 안내';
   if (document.activeElement !== g('acctName')) g('acctName').value = (p && p.displayName) || '';
   const L = g('acctLedger'); L.innerHTML = '';
   if (!ledger.length) L.innerHTML = '<div class="acct-led-i" style="color:#bbb">내역이 없어요</div>';
@@ -179,17 +203,38 @@ function updateStatus() {
   if (A.needsVerification(u)) { dot.className = 'hd-dot'; stx.textContent = '이메일 인증 필요'; return; }
   const c = p ? p.credits || 0 : null;
   dot.className = 'hd-dot' + (c ? ' on' : '');
+  const pb = g('planBadge');
+  pb.hidden = !p; pb.textContent = isPro() ? 'PRO' : 'FREE'; pb.className = 'plan-badge sm' + (isPro() ? ' pro' : '');
   stx.textContent = c === null ? '불러오는 중…' : '크레딧 ' + c + '개';
   updateGenHint();
+  updateUsage();
+}
+/** 저장 글·내보내기 사용량 표시 (FREE: n / 한도, PRO: 제한 없음) */
+function updateUsage() {
+  const su = g('savedUsage'), eu = g('exportUsage');
+  if (!state.user || !state.profile) { su.innerHTML = ''; eu.innerHTML = ''; return; }
+  const n = savedCountOf(), e = exportCountOf();
+  if (isPro()) {
+    su.textContent = '💾 저장된 글 ' + n + '개 · PRO 는 개수 제한이 없어요';
+    eu.textContent = '📤 JSON 내보내기 무제한 (PRO)';
+    return;
+  }
+  const sl = policy.freeSavedPostLimit, el = policy.freeExportLimit;
+  su.innerHTML = '💾 저장된 글 <b>' + n + ' / ' + sl + '개</b>' + (n >= sl ? ' · 저장 한도에 도달했어요. 글을 삭제하거나 <button onclick="openPro(\'saved\')">PRO 안내</button>' : '');
+  eu.innerHTML = '📤 무료 내보내기 ' + Math.min(e, el) + ' / ' + el + '회 사용' + (e >= el ? ' · <button onclick="openPro(\'export\')">PRO 는 무제한</button>' : '');
 }
 function updateGenHint() {
   const h = g('genHint'), p = state.profile;
-  if (!state.user) { h.innerHTML = '💳 로그인 후 이용 · 신규 회원 무료 2크레딧'; return; }
-  if (A.needsVerification(state.user)) { h.innerHTML = '📧 이메일 인증 후 무료 2크레딧이 지급돼요'; return; }
+  const nb = policy.signupBonusCredits;
+  if (!state.user) { h.innerHTML = '💳 로그인 후 이용 · 이메일 인증 회원 첫 <b>' + nb + '회 무료</b>'; return; }
+  if (A.needsVerification(state.user)) { h.innerHTML = '📧 이메일 인증 후 무료 크레딧 ' + nb + '개가 지급돼요'; return; }
   const c = p ? p.credits || 0 : 0;
+  const freeLeft = p ? p.freeCredits || 0 : 0;
+  const firstFree = p && !p.paidCredits && freeLeft > 0 && !isPro();
   h.innerHTML = c > 0
-    ? '💳 생성 1회 = <b>1크레딧</b> 차감 · 실패하면 자동 복구 · 남은 크레딧 <b>' + c + '개</b>'
-    : '🙏 크레딧을 모두 사용했어요 · 충전 기능은 곧 오픈 예정이에요';
+    ? (firstFree ? '🎁 첫 무료 생성 <b>' + freeLeft + '회</b> 남음 · ' : '')
+      + '생성·재생성 1회 = <b>1크레딧</b> · 실패하면 자동 복구' + (firstFree ? '' : ' · 남은 크레딧 <b>' + c + '개</b>')
+    : '🙏 크레딧을 모두 사용했어요 · 크레딧 충전은 곧 오픈 예정이에요 <button class="auth-link" style="font-size:10px" onclick="openPro(\'credits\')">PRO 안내</button>';
 }
 
 /* ── 로그인 상태 변화 ── */
@@ -199,16 +244,24 @@ async function syncProfile(u) {
 A.onUser(async (u) => {
   unsubs.forEach((f) => f()); unsubs = [];
   state.user = u; state.profile = null; state.posts = []; ledger = [];
-  state.generations = [];
-  updateStatus(); updateSavedCount(); renderSavedList(); renderHistory();
+  state.generations = []; styles = []; postsLimit = P.PAGE_SIZE; postsHasMore = false; pendingExport = null;
+  if (postsUnsub) { postsUnsub(); postsUnsub = null; }
+  updateStatus(); updateSavedCount(); renderSavedList(); renderHistory(); renderStyleSel();
   if (!u) return;
   await syncProfile(u);
-  unsubs.push(acct.subscribeProfile(u.uid, (p) => { state.profile = p; updateStatus(); renderAccount(); }));
+  unsubs.push(acct.subscribeProfile(u.uid, (p) => { state.profile = p; updateStatus(); renderAccount(); updateSavedCount(); renderStyleSel(); }));
+  unsubs.push(F.subscribeStyles(u.uid, (list) => { styles = list; renderStyleSel(); renderStyleList(); renderAccount(); }));
   unsubs.push(G.subscribeGenerations(u.uid, (list) => { state.generations = list; renderHistory(); }));
   resumePending(u.uid);
   unsubs.push(acct.subscribeLedger(u.uid, (l) => { ledger = l; renderAccount(); }));
-  unsubs.push(P.subscribePosts(u.uid, (posts) => { state.posts = posts; updateSavedCount(); renderSavedList(); }));
+  subscribePostsPage(u.uid);
+  unsubs.push(() => { if (postsUnsub) { postsUnsub(); postsUnsub = null; } });
 });
+function subscribePostsPage(uid) {
+  if (postsUnsub) postsUnsub();
+  postsUnsub = P.subscribePosts(uid, (posts, more) => { state.posts = posts; postsHasMore = more; updateSavedCount(); renderSavedList(); }, postsLimit);
+}
+function morePosts() { if (!state.user) return; postsLimit += P.PAGE_SIZE; subscribePostsPage(state.user.uid); }
 
 /* ── 입력 선택 (기존 st/sv) ── */
 function st(b, t) { document.querySelectorAll('.tb').forEach((x) => x.classList.remove('on')); b.classList.add('on'); state.sT = t; }
@@ -245,16 +298,21 @@ function startLoading(msg) {
 /** 생성 결과(서버 응답 / generations 문서 / 저장 글 / JSON)를 화면에 표시.
  *  사진은 저장하지 않으므로, 생성 직후에만 브라우저 메모리의 사진(localPhotos)으로 미리보기.
  *  다시 연 글은 본문 [사진N] 배치만 있고, 왼쪽에서 사진을 다시 첨부하면 미리보기에 표시된다. */
-function showGeneration(gen, { localPhotos, input } = {}) {
+function showGeneration(gen, { localPhotos, input, postId } = {}) {
   const inp = input || gen.input || null;
   state.resultData = gen.result;
   state.resultMeta = {
     generationId: gen.generationId || gen.id || null,
+    postId: postId || null,              // 저장된 글에서 열었으면 그 글 (다시 저장 = 수정, 개수 증가 없음)
+    clientSaveId: P.newClientSaveId(),   // 생성 ID 없는 글(JSON 불러오기 등) 저장 재시도 시 같은 값
     type: (inp && inp.type) || state.sT,
     input: inp,
+    style: gen.style || null,
     createdAt: gen.createdAt && gen.createdAt.toDate ? gen.createdAt.toDate().toISOString() : (gen.createdAt || null),
   };
   state.previewPhotos = localPhotos || null;
+  pendingExport = null;
+  endEdit(false);
   show(gen.result);
 }
 
@@ -316,7 +374,7 @@ async function gen(ev) {
   const t = g('ti').value.trim(), m = g('mi').value.trim(), c = g('ci').value.trim(), info = g('ii').value.trim();
   if (!t || !state.sT || !c || !state.sV) { showError('⚠️ 제목, 글 유형, 내용, 분량을 모두 입력/선택해주세요!'); return; }
   if (state.profile && (state.profile.credits || 0) < 1) {
-    showError('🙏 크레딧을 모두 사용했어요. 크레딧 충전 기능은 곧 오픈 예정이에요. 조금만 기다려주세요!', { info: true });
+    showError('🙏 크레딧을 모두 사용했어요. 크레딧 충전 기능은 곧 오픈 예정이에요. 조금만 기다려주세요! (저장된 글 보기·수정·복사·JSON 불러오기는 계속 이용할 수 있어요)', { info: true });
     return;
   }
   state.inFlight = true;
@@ -333,7 +391,7 @@ async function gen(ev) {
   const sb = g('sb');
   try {
     const res = await api.generatePost(
-      { title: t, type: state.sT, content: c, memo: m, info, volume: state.sV, images: localPhotos, clientRequestId },
+      { title: t, type: state.sT, content: c, memo: m, info, volume: state.sV, images: localPhotos, clientRequestId, style: F.styleRequest(validStyleChoice()) },
       (ch) => {
         if (ch.type === 'status') sb.textContent += ch.message + '\n';
         else if (ch.type === 'text') sb.textContent += ch.delta;
@@ -426,25 +484,33 @@ function reset() {
 }
 
 /* ── 저장된 글 (Firestore) ── */
-function updateSavedCount() { const n = state.posts.length; g('savedCount').textContent = n > 0 ? n : ''; }
+function updateSavedCount() { const n = state.user ? savedCountOf() : 0; g('savedCount').textContent = n > 0 ? n : ''; updateUsage(); }
 
 async function savePost() {
   if (!state.resultData) { alert('저장할 글이 없어요!'); return; }
   if (!state.user) { openAccount(); return; }
+  if (A.needsVerification(state.user)) { openAccount(); return; }
+  if (editing) endEdit(true);
   const btn = g('saveBtn');
+  const meta = state.resultMeta || (state.resultMeta = { clientSaveId: P.newClientSaveId() });
   try {
     btn.disabled = true;
-    await P.createPost(state.user.uid, {
+    const r = await P.savePost({
+      postId: meta.postId || null,
       title: state.resultData.title_1 || g('ti').value || '제목 없음',
-      type: (state.resultMeta && state.resultMeta.type) || state.sT,
+      type: meta.type || state.sT,
       data: state.resultData,
-      generationId: state.resultMeta && state.resultMeta.generationId,
-      input: (state.resultMeta && state.resultMeta.input) || null,
+      generationId: meta.generationId || null,
+      input: meta.input || null,
+      style: meta.style || null,
+      clientSaveId: meta.clientSaveId,
     });
-    btn.textContent = '✅ 저장됨!'; btn.style.background = '#388e3c'; btn.style.color = '#fff'; btn.style.borderColor = '#388e3c';
+    meta.postId = r.postId; // 이후 저장은 같은 글 수정
+    btn.textContent = r.created ? '✅ 저장됨!' : '✅ 수정 저장됨!'; btn.style.background = '#388e3c'; btn.style.color = '#fff'; btn.style.borderColor = '#388e3c';
     setTimeout(() => { btn.textContent = '💾 저장'; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }, 2000);
   } catch (e) {
-    alert('저장에 실패했어요: ' + e.message);
+    if (e.details && e.details.reason === 'saved_post_limit') { openPro('saved', api.serverMessage(e)); return; }
+    alert('저장에 실패했어요: ' + api.apiErrorMessage(e));
   } finally { btn.disabled = false; }
 }
 
@@ -460,7 +526,13 @@ function renderLegacyBar() {
   const b = document.createElement('button'); b.textContent = '계정으로 가져오기';
   b.onclick = async () => {
     b.disabled = true; b.textContent = '가져오는 중…';
-    try { const r = await P.importLegacyPosts(state.user.uid); alert('✅ ' + r.imported + '개 가져왔어요.' + (r.skipped ? ' (이미 있는 글 ' + r.skipped + '개 제외)' : '') + '\n원본은 이 브라우저에도 그대로 남아 있어요.'); } catch (e) { alert('가져오기 실패: ' + e.message); b.disabled = false; b.textContent = '계정으로 가져오기'; }
+    try {
+      const r = await P.importLegacyPosts();
+      alert('✅ ' + r.imported + '개 가져왔어요.' + (r.skipped ? ' (이미 있는 글 ' + r.skipped + '개 제외)' : '')
+        + (r.limited ? '\n무료 회원 저장 한도(' + policy.freeSavedPostLimit + '개)에 도달해 나머지는 가져오지 못했어요.' : '')
+        + '\n원본은 이 브라우저에도 그대로 남아 있어요.');
+      if (r.limited) openPro('saved');
+    } catch (e) { alert('가져오기 실패: ' + api.apiErrorMessage(e)); b.disabled = false; b.textContent = '계정으로 가져오기'; }
   };
   d.appendChild(t); d.appendChild(b); bar.appendChild(d);
 }
@@ -478,6 +550,7 @@ function renderSavedList() {
   g('savedEmptyT').textContent = '저장된 글이 없어요';
   g('savedEmptyD').textContent = '포스팅 생성 후 💾 저장 버튼을 누르세요';
   const posts = state.posts;
+  g('savedMore').style.display = postsHasMore ? '' : 'none';
   if (posts.length === 0) { empty.style.display = 'block'; return; }
   empty.style.display = 'none';
 
@@ -485,7 +558,12 @@ function renderSavedList() {
   const clearBtn = document.createElement('button');
   clearBtn.style.cssText = 'background:none;border:1px solid #ffcdd2;color:#dc3545;border-radius:7px;padding:6px 12px;font-family:inherit;font-size:11px;cursor:pointer';
   clearBtn.textContent = '🗑️ 전체 삭제';
-  clearBtn.onclick = async () => { if (!confirm('저장된 글 ' + posts.length + '개를 모두 삭제할까요?')) return; await P.removeAllPosts(state.user.uid); };
+  clearBtn.onclick = async () => {
+    if (!confirm('목록에 표시된 저장 글 ' + posts.length + '개를 모두 삭제할까요?')) return;
+    clearBtn.disabled = true;
+    try { await P.removeAllPosts(posts.slice()); if (state.resultMeta) state.resultMeta.postId = null; } catch (e) { alert('삭제 실패: ' + api.apiErrorMessage(e)); }
+    clearBtn.disabled = false;
+  };
   clearAll.appendChild(clearBtn); list.appendChild(clearAll);
 
   posts.forEach((post) => {
@@ -517,7 +595,7 @@ function renderSavedList() {
     loadBtn.textContent = '📄 불러오기';
     loadBtn.onclick = () => {
       switchTab('result');
-      showGeneration({ id: post.generationId || null, result: data, input: post.input || { type: post.type }, createdAt: post.createdAt });
+      showGeneration({ id: post.generationId || null, result: data, input: post.input || { type: post.type }, style: post.style || null, createdAt: post.createdAt }, { postId: post.id });
     };
     const cpBtn = document.createElement('button');
     cpBtn.style.cssText = 'flex:1;padding:9px;background:#fff;color:#2d6a4f;border:1.5px solid #2d6a4f;border-radius:8px;font-family:inherit;font-size:12px;font-weight:600;cursor:pointer';
@@ -529,18 +607,43 @@ function renderSavedList() {
     const delBtn = document.createElement('button');
     delBtn.style.cssText = 'padding:9px 12px;background:#fff;color:#dc3545;border:1.5px solid #ffcdd2;border-radius:8px;font-family:inherit;font-size:12px;cursor:pointer';
     delBtn.textContent = '🗑️';
-    delBtn.onclick = async () => { if (!confirm('이 글을 삭제할까요?')) return; await P.removePost(post.id); };
+    delBtn.onclick = async () => {
+      if (!confirm('이 글을 삭제할까요?')) return;
+      try { await P.removePost(post.id); if (state.resultMeta && state.resultMeta.postId === post.id) state.resultMeta.postId = null; } catch (e) { alert('삭제 실패: ' + api.apiErrorMessage(e)); }
+    };
     btns.appendChild(loadBtn); btns.appendChild(cpBtn); btns.appendChild(delBtn);
     card.appendChild(btns); list.appendChild(card);
   });
 }
 
-/* ── JSON 내보내기·불러오기 (무료 · 서버 호출 없음 · 사진/민감정보 제외) ── */
-function exportJson() {
+/* ── JSON 내보내기·불러오기 (사진·민감정보 제외) ──
+ * 내보내기: 파일 내용 검증 → 서버 승인(authorizeExport, FREE 누적 한도) → 다운로드. 크레딧은 쓰지 않음.
+ * 브라우저에서 만드는 파일이라 화면 복사까지 막을 수는 없고(DRM 아님), 앱의 공식 내보내기 기능 횟수를 서버에서 제한한다.
+ * 불러오기: 모든 회원 무제한 · 서버 호출·AI 호출·크레딧 차감 없음 · 계정 저장과는 별개 (저장 한도 우회 불가) */
+let exporting = false;
+async function exportJson() {
   if (!state.resultData) { alert('내보낼 글이 없어요!'); return; }
+  if (!state.user || A.needsVerification(state.user)) { openAccount(); return; }
+  if (exporting) return;
+  if (editing) endEdit(true);
   const meta = state.resultMeta || {};
   const input = meta.input || { title: g('ti').value, memo: g('mi').value, content: g('ci').value, info: g('ii').value, type: state.sT, volume: state.sV };
-  const exp = B.buildExport({ input, result: state.resultData, createdAt: meta.createdAt || null });
+  let exp;
+  try { exp = B.buildExport({ input, result: state.resultData, createdAt: meta.createdAt || null, style: meta.style || null }); } catch (e) { alert('내보내기 실패: ' + e.message); return; } // 검증 실패는 횟수 차감 없음
+  const key = JSON.stringify([exp.input, exp.result, exp.style]);
+  if (!pendingExport || pendingExport.key !== key) pendingExport = { key, requestId: 'exp_' + api.newRequestId().slice(4) };
+  const btn = g('exportBtn');
+  exporting = true; btn.disabled = true;
+  try {
+    await F.authorizeExport({ requestId: pendingExport.requestId }); // 응답이 끊겨 다시 눌러도 같은 requestId → 1회만 집계
+  } catch (e) {
+    exporting = false; btn.disabled = false;
+    if (e.details && e.details.reason === 'export_limit') { pendingExport = null; openPro('export', api.serverMessage(e)); return; }
+    alert('내보내기 실패: ' + api.apiErrorMessage(e));
+    return;
+  }
+  pendingExport = null;
+  exporting = false; btn.disabled = false;
   const blob = new Blob([JSON.stringify(exp, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -561,6 +664,8 @@ function onJsonFile(e) {
   r.onload = () => {
     let d;
     try { d = B.parseImport(String(r.result)); } catch (err) { alert('불러오기 실패: ' + err.message); return; }
+    const hasWork = !!state.resultData || ['ti', 'mi', 'ci', 'ii'].some((id) => g(id).value.trim());
+    if (hasWork && !confirm('지금 작성 중인 입력값과 결과가 불러온 내용으로 바뀌어요. 계속할까요?\n(계정에 저장된 글은 바뀌지 않아요)')) return;
     // 입력값 복원 (사진은 복원하지 않음 — 필요하면 다시 첨부)
     g('ti').value = d.input.title; g('mi').value = d.input.memo; g('ci').value = d.input.content; g('ii').value = d.input.info;
     document.querySelectorAll('.tb').forEach((b) => b.classList.remove('on')); state.sT = '';
@@ -570,19 +675,131 @@ function onJsonFile(e) {
     if (vi != null) sv(document.querySelectorAll('.vb')[vi], d.input.volume);
     state.currentRequestId = null;
     g('eb').className = 'err';
-    showGeneration({ id: null, result: d.result, createdAt: d.createdAt }, { input: d.input });
+    showGeneration({ id: null, result: d.result, style: d.style, createdAt: d.createdAt }, { input: d.input });
     switchTab('result');
-    const notes = [d.note, d.imageCount ? `📸 사진 ${d.imageCount}장 배치 정보가 있어요. 사진은 파일에 포함되지 않으니 필요하면 왼쪽에서 다시 첨부해주세요.` : ''].filter(Boolean);
+    const notes = [d.note, '불러온 글은 아직 계정에 저장되지 않았어요. 필요하면 💾 저장을 눌러주세요.', d.imageCount ? `📸 사진 ${d.imageCount}장 배치 정보가 있어요. 사진은 파일에 포함되지 않으니 필요하면 왼쪽에서 다시 첨부해주세요.` : ''].filter(Boolean);
     if (notes.length) alert('✅ 불러왔어요.\n' + notes.join('\n'));
   };
   r.onerror = () => alert('파일을 읽을 수 없어요.');
   r.readAsText(f, 'utf-8');
 }
 
+/* ── 작성 스타일 ── */
+function validStyleChoice() {
+  if (styleChoice.startsWith('style:') && !styles.some((x) => 'style:' + x.id === styleChoice)) return 'preset:basic';
+  return styleChoice;
+}
+function renderStyleSel() {
+  const sel = g('styleSel');
+  sel.innerHTML = '';
+  F.PRESET_OPTIONS.forEach((o) => { const op = document.createElement('option'); op.value = o.value; op.textContent = o.label; sel.appendChild(op); });
+  styles.forEach((x) => { const op = document.createElement('option'); op.value = 'style:' + x.id; op.textContent = '🎨 ' + (x.name || '내 스타일'); sel.appendChild(op); });
+  sel.value = validStyleChoice();
+}
+function pickStyle(v) { styleChoice = v; F.saveStyleChoice(v); }
+function openStyles() {
+  if (!state.user) { openAccount(); return; }
+  if (A.needsVerification(state.user)) { openAccount(); return; }
+  renderStyleList(); newStyleForm();
+  showView('viewStyle');
+}
+function renderStyleList() {
+  const L = g('styleList');
+  if (!L) return;
+  L.innerHTML = '';
+  const lim = policy.freeStyleLimit;
+  g('styleUsage').textContent = isPro() ? '저장한 스타일 ' + styles.length + '개 (PRO)' : '무료 회원은 스타일 ' + lim + '개까지 저장할 수 있어요 (' + styles.length + ' / ' + lim + ')';
+  if (!styles.length) { L.innerHTML = '<div class="style-it" style="color:#bbb">저장한 스타일이 없어요 — 아래에서 만들어보세요</div>'; return; }
+  styles.forEach((x) => {
+    const row = document.createElement('div'); row.className = 'style-it';
+    const t = document.createElement('span'); t.textContent = '🎨 ' + (x.name || '내 스타일') + ' · ' + (F.TONE_LABEL[x.tone] || '') + (x.blogName ? ' · ' + x.blogName : '');
+    const e = document.createElement('button'); e.textContent = '수정'; e.onclick = () => editStyle(x.id);
+    const d = document.createElement('button'); d.className = 'del'; d.textContent = '삭제'; d.onclick = () => removeStyle(x.id);
+    row.appendChild(t); row.appendChild(e); row.appendChild(d); L.appendChild(row);
+  });
+}
+function fillStyleForm(x) {
+  g('sfName').value = x.name || ''; g('sfBlog').value = x.blogName || ''; g('sfGreet').value = x.greeting || '';
+  g('sfClose').value = x.closing || ''; g('sfTone').value = x.tone || 'friendly'; g('sfEmoji').checked = x.useEmoji !== false; g('sfExtra').value = x.extra || '';
+  msg('styleErr', ''); msg('styleOk', '');
+}
+function newStyleForm() { editingStyleId = null; g('styleFormT').textContent = '새 스타일'; fillStyleForm({}); }
+function editStyle(id) {
+  const x = styles.find((y) => y.id === id); if (!x) return;
+  editingStyleId = id; g('styleFormT').textContent = '스타일 수정 · ' + (x.name || ''); fillStyleForm(x);
+}
+async function submitStyle() {
+  const data = {
+    name: g('sfName').value.trim(), blogName: g('sfBlog').value.trim(), greeting: g('sfGreet').value.trim(), closing: g('sfClose').value.trim(),
+    tone: g('sfTone').value, useEmoji: g('sfEmoji').checked, extra: g('sfExtra').value.trim(),
+  };
+  if (!data.name) return msg('styleErr', '⚠️ 스타일 이름을 입력해주세요.', true);
+  if (!editingStyleId && !isPro() && styles.length >= policy.freeStyleLimit) {
+    return msg('styleErr', '⚠️ 무료 회원은 스타일 ' + policy.freeStyleLimit + '개까지 저장할 수 있어요. 기존 스타일을 수정하거나 PRO 안내를 확인해주세요.', true);
+  }
+  await withBusy(['sfSave'], async () => {
+    try {
+      const r = await F.saveStyle(editingStyleId ? { ...data, styleId: editingStyleId } : data);
+      msg('styleErr', ''); msg('styleOk', '✅ 저장했어요.');
+      if (!editingStyleId && r && r.styleId) { pickStyle('style:' + r.styleId); renderStyleSel(); }
+      editingStyleId = r && r.styleId ? r.styleId : editingStyleId;
+    } catch (e) {
+      if (e.details && e.details.reason === 'style_limit') { openPro('styles', api.serverMessage(e)); return; }
+      msg('styleErr', '⚠️ ' + api.apiErrorMessage(e), true);
+    }
+  });
+}
+async function removeStyle(id) {
+  if (!confirm('이 스타일을 삭제할까요? (이미 생성·저장한 글에는 영향 없어요)')) return;
+  try { await F.deleteStyle({ styleId: id }); if (editingStyleId === id) newStyleForm(); if (styleChoice === 'style:' + id) pickStyle('preset:basic'); } catch (e) { msg('styleErr', '⚠️ ' + api.apiErrorMessage(e), true); }
+}
+
+/* ── PRO 안내 (결제 기능은 준비 중 — 이 화면은 안내만, 결제·등급 변경 없음) ── */
+const PRO_REASON = {
+  saved: '무료 회원은 글을 최대 {saved}개까지 저장할 수 있어요. 기존 글을 삭제하면 다시 저장할 수 있어요.',
+  export: '무료 JSON 내보내기 {export}회를 모두 사용했어요. JSON 불러오기는 계속 무료예요.',
+  styles: '무료 회원은 작성 스타일을 {styles}개까지 저장할 수 있어요.',
+  credits: '크레딧을 모두 사용했어요. 저장된 글 보기·수정·복사는 계속 이용할 수 있어요.',
+};
+function openPro(reason, message) {
+  const t = (PRO_REASON[reason] || '').replace('{saved}', policy.freeSavedPostLimit).replace('{export}', policy.freeExportLimit).replace('{styles}', policy.freeStyleLimit);
+  g('proReason').textContent = isPro() ? '이미 PRO 회원이에요 ⭐' : (message || t || 'PRO 회원이 되면 이런 혜택이 있어요.');
+  showView('viewPro');
+}
+
+/* ── 본문 수정 (크레딧 없음) ── */
+let editing = false;
+function toggleEdit() { if (editing) endEdit(true); else startEdit(); }
+function startEdit() {
+  if (!state.resultData) return;
+  const el = g('btxt');
+  el.textContent = String(state.resultData.body || '').replace(/\\n/g, '\n');
+  try { el.contentEditable = 'plaintext-only'; } catch (e) { el.contentEditable = 'true'; }
+  if (el.contentEditable !== 'plaintext-only') el.contentEditable = 'true';
+  editing = true; g('editBtn').textContent = '✅ 완료'; g('editHint').style.display = '';
+  el.focus();
+}
+function endEdit(apply) {
+  const el = g('btxt');
+  if (!editing) return;
+  editing = false;
+  el.contentEditable = 'false';
+  g('editBtn').textContent = '✏️ 수정'; g('editHint').style.display = 'none';
+  if (apply && state.resultData) {
+    const body = el.innerText.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    state.resultData = { ...state.resultData, body };
+    g('cc').textContent = body.replace(/\s/g, '').length.toLocaleString() + '자';
+    pendingExport = null;
+  }
+}
+
 /* ── HTML onclick 에서 쓰는 함수 노출 (기존 마크업 유지) ── */
 Object.assign(window, {
   st, sv, gen, reset, savePost, switchTab, addImg, cpId, cpTags, cpAll, exportJson, importJson, onJsonFile,
   openAccount, closeModal, loginGoogle, loginEmail, signupEmail, resetPw, resendVerify, checkVerified, logout, saveName, withdraw, adminCheck,
+  openStyles, newStyleForm, submitStyle, pickStyle, openPro, morePosts, toggleEdit,
 });
 
+applyPolicyText();
+renderStyleSel();
 renderSavedList();

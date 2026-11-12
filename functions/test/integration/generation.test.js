@@ -51,7 +51,12 @@ async function rejectsWith(p, reason) {
   await assert.rejects(p, (e) => { assert.equal(e.details && e.details.reason, reason, `expected ${reason}, got ${e.details && e.details.reason} (${e.message})`); return true; });
 }
 
-test.beforeEach(clear);
+// 이 파일의 시나리오는 "가입 무료 2크레딧" 기준 — 운영 설정(config/policy)으로 2개를 지정해 유지 (기본값 5 검증은 features.test.js)
+test.beforeEach(async () => {
+  await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/emulator/v1/projects/demo-jaeinit/databases/(default)/documents`, { method: 'DELETE' });
+  await db.doc('config/policy').set({ signupBonusCredits: 2 });
+  if (service.resetGateCache) service.resetGateCache();
+});
 
 test('① 신규 가입 후 무료 2회 사용 → 잔액 0, 원장 +2 −1 −1', async () => {
   await newUser('u1');
@@ -85,7 +90,7 @@ test('③ Claude 요청 구성 (mock 이 받은 파라미터 검증 — 실제 A
   await newUser('u3');
   const ai = createMockClient();
   const naver = { clientId: 'x', clientSecret: 'y', find: async () => ({ name: '바 알팔파', address: '세비야 알팔파 광장', tel: '', category: '스페인음식' }) };
-  const r = await service.generate(deps({ ai: { client: ai, provider: 'mock' }, naver }), CFG, { uid: 'u3', input: input({ memo: '남편이랑 방문', images: [JPEG, JPEG] }) });
+  const r = await service.generate(deps({ ai: { client: ai, provider: 'mock' }, naver }), CFG, { uid: 'u3', input: input({ memo: '남편이랑 방문', images: [JPEG, JPEG], style: { preset: 'jaeinit' } }) });
   const p = ai.calls[0];
   assert.equal(p.model, 'claude-sonnet-4-6');
   assert.equal(p.max_tokens, 8192);
